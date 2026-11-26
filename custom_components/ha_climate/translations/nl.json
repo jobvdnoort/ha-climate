@@ -34,7 +34,8 @@
       "name_required": "Geef de ruimte een naam.",
       "name_exists": "Er bestaat al een ruimte met deze naam.",
       "climates_required": "Kies minimaal één vloerverwarmingslus.",
-      "climate_in_use": "Een van deze lussen is al aan een andere ruimte gekoppeld."
+      "climate_in_use": "Een van deze lussen is al aan een andere ruimte gekoppeld.",
+      "night_above_day": "De nachttemperatuur moet lager zijn dan de dagtemperatuur."
     },
     "abort": {
       "already_configured": "Deze gassensor is al geconfigureerd."
@@ -90,10 +91,16 @@
           "use_global_night": "Algemene nachtverlaging gebruiken",
           "night_start": "Starttijd verlaging",
           "night_end": "Eindtijd / ochtendherstel",
-          "night_offset": "Temperatuurverlaging"
+          "night_offset": "Temperatuurverlaging",
+          "day_temp": "Dagtemperatuur (optioneel)",
+          "night_temp": "Vaste nachttemperatuur (optioneel)",
+          "comfort_time": "Op temperatuur om",
+          "optimum_start": "Optimum start"
         },
         "data_description": {
-          "use_global_night": "Uitzetten om hieronder eigen tijden en verlaging voor deze ruimte te gebruiken."
+          "use_global_night": "Uitzetten om hieronder eigen tijden en verlaging voor deze ruimte te gebruiken.",
+          "night_temp": "Indien ingevuld wordt deze temperatuur 's nachts ingesteld in plaats van de relatieve verlaging.",
+          "optimum_start": "Start de verwarming automatisch op basis van het geleerde thermische model, zodat de kamer om de ingestelde tijd op dagtemperatuur is."
         }
       },
       "room": {
@@ -105,10 +112,16 @@
           "use_global_night": "Algemene nachtverlaging gebruiken",
           "night_start": "Starttijd verlaging",
           "night_end": "Eindtijd / ochtendherstel",
-          "night_offset": "Temperatuurverlaging"
+          "night_offset": "Temperatuurverlaging",
+          "day_temp": "Dagtemperatuur (optioneel)",
+          "night_temp": "Vaste nachttemperatuur (optioneel)",
+          "comfort_time": "Op temperatuur om",
+          "optimum_start": "Optimum start"
         },
         "data_description": {
-          "use_global_night": "Uitzetten om hieronder eigen tijden en verlaging voor deze ruimte te gebruiken."
+          "use_global_night": "Uitzetten om hieronder eigen tijden en verlaging voor deze ruimte te gebruiken.",
+          "night_temp": "Indien ingevuld wordt deze temperatuur 's nachts ingesteld in plaats van de relatieve verlaging.",
+          "optimum_start": "Start de verwarming automatisch op basis van het geleerde thermische model, zodat de kamer om de ingestelde tijd op dagtemperatuur is."
         }
       },
       "edit_room": {
@@ -143,7 +156,8 @@
       "name_required": "Geef de ruimte een naam.",
       "name_exists": "Er bestaat al een ruimte met deze naam.",
       "climates_required": "Kies minimaal één vloerverwarmingslus.",
-      "climate_in_use": "Een van deze lussen is al aan een andere ruimte gekoppeld."
+      "climate_in_use": "Een van deze lussen is al aan een andere ruimte gekoppeld.",
+      "night_above_day": "De nachttemperatuur moet lager zijn dan de dagtemperatuur."
     }
   },
   "entity": {
@@ -159,7 +173,7 @@
     },
     "switch": {
       "night_setback": {
-        "name": "Nachtverlaging"
+        "name": "Alle thermostaten nachtverlaging"
       },
       "room_night_setback": {
         "name": "Nachtverlaging {room}"
@@ -204,6 +218,18 @@
       },
       "saved_money_total": {
         "name": "Besparing totaal"
+      },
+      "room_cooling_rate": {
+        "name": "Afkoelsnelheid {room}"
+      },
+      "room_heating_rate": {
+        "name": "Opwarmsnelheid {room}"
+      },
+      "room_model_confidence": {
+        "name": "Betrouwbaarheid model {room}"
+      },
+      "room_heating_start": {
+        "name": "Starttijd verwarming {room}"
       }
     }
   },

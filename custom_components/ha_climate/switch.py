@@ -87,6 +87,11 @@ class RoomNightSetbackSwitch(HaClimateEntity, SwitchEntity):
             "starttijd": settings.start.strftime("%H:%M"),
             "eindtijd": settings.end.strftime("%H:%M"),
             "verlaging": settings.offset,
+            "dagtemperatuur": settings.day_temp,
+            "nachttemperatuur": settings.night_temp,
+            "op_temperatuur_om": settings.comfort_time.strftime("%H:%M"),
+            "optimum_start": settings.optimum_start,
+            "status": self.coordinator.room_status(self._room),
             "verlaging_actief": self.coordinator.room_setback_active(self._room_id),
         }
 

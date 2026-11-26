@@ -13,6 +13,8 @@ from homeassistant.helpers.typing import ConfigType
 
 from .const import ATTR_CONFIG_ENTRY_ID, DOMAIN, SERVICE_RECALCULATE_BASELINE
 from .coordinator import HaClimateConfigEntry, HaClimateCoordinator, async_restore_all
+from .panel import async_register_panel, async_unregister_panel
+from .websocket_api import async_register_websocket_api
 
 PLATFORMS: list[Platform] = [
     Platform.BINARY_SENSOR,
@@ -27,7 +29,8 @@ SERVICE_SCHEMA = vol.Schema({vol.Optional(ATTR_CONFIG_ENTRY_ID): cv.string})
 
 
 async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
-    """Register the integration services."""
+    """Register the integration services and the panel's WebSocket API."""
+    async_register_websocket_api(hass)
 
     async def _async_recalculate(call: ServiceCall) -> dict:
         entry_id = call.data.get(ATTR_CONFIG_ENTRY_ID)
@@ -71,6 +74,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: HaClimateConfigEntry) ->
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     coordinator.async_start()
+    await async_register_panel(hass)
     entry.async_on_unload(coordinator.async_stop)
     entry.async_on_unload(entry.add_update_listener(_async_update_listener))
     return True
@@ -78,12 +82,18 @@ async def async_setup_entry(hass: HomeAssistant, entry: HaClimateConfigEntry) ->
 
 async def async_unload_entry(hass: HomeAssistant, entry: HaClimateConfigEntry) -> bool:
     """Unload a config entry."""
+    # The panel stays registered: removing it on every reload (e.g. after saving
+    # a room in the panel) would kick the user out of the page.
     return await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
 
 
 async def async_remove_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
-    """Restore lowered thermostats and remove stored data."""
+    """Restore lowered thermostats, remove stored data and the panel."""
     await async_restore_all(hass, entry.entry_id)
+    if not any(
+        other.entry_id != entry.entry_id for other in hass.config_entries.async_entries(DOMAIN)
+    ):
+        async_unregister_panel(hass)
 
 
 async def _async_update_listener(hass: HomeAssistant, entry: ConfigEntry) -> None:

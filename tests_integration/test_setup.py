@@ -140,7 +140,7 @@ async def test_full_setup(hass, ha_climate_enabled) -> None:
         hass, entry, "fireplace", {"fireplace_climate": "climate.living", "fireplace_threshold": 0.5}
     )
     room_id = entry.options["rooms"][0]["id"]
-    assert hass.states.get("switch.ha_climate_night_setback").state == "on"
+    assert hass.states.get("switch.ha_climate_all_thermostats_night_setback").state == "on"
     assert hass.states.get("switch.ha_climate_night_setback_woonkamer").state == "on"
 
     coordinator = entry.runtime_data
@@ -152,6 +152,12 @@ async def test_full_setup(hass, ha_climate_enabled) -> None:
     assert coordinator.data.degree_days_yesterday == pytest.approx(10.0)
     assert coordinator.data.expected_yesterday == pytest.approx(4.0, abs=1e-6)
     assert coordinator.to_euro(4.0) == pytest.approx(5.0)
+    # Savings sensors have values (were "unknown" before).
+    await coordinator.async_request_refresh()
+    await hass.async_block_till_done()
+    assert hass.states.get("sensor.ha_climate_savings_today").state not in ("unknown", "unavailable")
+    assert hass.states.get("sensor.ha_climate_gas_saved_total").state not in ("unknown", "unavailable")
+    assert hass.states.get("sensor.ha_climate_savings_total").state not in ("unknown", "unavailable")
 
     # --- Night setback ----------------------------------------------------
     night = dt_util.now().replace(hour=22, minute=5, second=0, microsecond=0)

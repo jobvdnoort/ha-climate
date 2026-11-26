@@ -52,17 +52,21 @@ def test_baseline_skips_warm_and_invalid_days():
     assert result.excluded_invalid == 3
 
 
-def test_baseline_requires_minimum_days():
+def test_baseline_flags_unreliable_with_few_days():
+    """A value is available right away (no 'unknown' sensors) but not reliable."""
     records = _records([(8.0, 4.0)] * 3)
     result = calc.calculate_baseline(records, 18.0, min_days=7)
-    assert result.m3_per_degree_day is None
-    assert not result.is_valid
+    assert result.m3_per_degree_day == pytest.approx(0.4)
+    assert result.is_valid
+    assert not result.reliable
     assert result.days_used == 3
+    assert calc.calculate_baseline(_records([(8.0, 4.0)] * 7), 18.0, min_days=7).reliable
 
 
 def test_baseline_empty():
     result = calc.calculate_baseline([], 18.0)
     assert result.m3_per_degree_day is None
+    assert not result.reliable
 
 
 def test_fireplace_excluded_days_threshold():

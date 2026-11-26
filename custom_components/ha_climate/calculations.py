@@ -73,6 +73,7 @@ class BaselineResult:
     excluded_warm: int = 0
     first_day: date | None = None
     last_day: date | None = None
+    reliable: bool = False
 
     @property
     def is_valid(self) -> bool:
@@ -98,6 +99,8 @@ def calculate_baseline(
     * the fireplace was active (the room was heated with wood instead of gas),
     * the night setback was active (the baseline must reflect "no savings"),
     * there were fewer than ``min_degree_days`` degree days (non-heating days).
+
+    The result is marked ``reliable`` when at least ``min_days`` days were used.
     """
     fireplace = set(fireplace_days)
     setback = set(setback_days)
@@ -124,8 +127,11 @@ def calculate_baseline(
         result.first_day = result.first_day or record.day
         result.last_day = record.day
 
-    if result.days_used >= max(1, min_days) and result.total_degree_days > 0:
+    # A value is calculated as soon as there is one usable day so the sensors
+    # never stay "unknown"; it is flagged reliable from ``min_days`` days on.
+    if result.days_used >= 1 and result.total_degree_days > 0:
         result.m3_per_degree_day = result.total_gas / result.total_degree_days
+        result.reliable = result.days_used >= max(1, min_days)
     return result
 
 

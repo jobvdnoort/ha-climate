@@ -7,14 +7,17 @@ from dataclasses import dataclass
 from typing import Any
 
 from homeassistant.components.sensor import (
+    RestoreSensor,
     SensorDeviceClass,
     SensorEntity,
     SensorEntityDescription,
+    SensorStateClass,
 )
-from homeassistant.const import CURRENCY_EURO, UnitOfVolume
+from homeassistant.const import CURRENCY_EURO, PERCENTAGE, EntityCategory, UnitOfVolume
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
+from .const import CONF_ROOM_ID, CONF_ROOM_NAME
 from .coordinator import EnergyData, HaClimateConfigEntry, HaClimateCoordinator
 from .entity import HaClimateEntity
 
@@ -66,7 +69,11 @@ def _attrs_baseline(c: HaClimateCoordinator, d: EnergyData) -> dict[str, Any]:
 
 
 def _attrs_total(c: HaClimateCoordinator, d: EnergyData) -> dict[str, Any]:
-    return {"dagen": d.saved_total_days}
+    return {"dagen": d.saved_total_days, **_attrs_price(c, d)}
+
+
+def _attrs_price(c: HaClimateCoordinator, d: EnergyData) -> dict[str, Any]:
+    return {"gasprijs": d.gas_price, "prijsbron": d.gas_price_source}
 
 
 def _baseline_value(c: HaClimateCoordinator, d: EnergyData) -> float | None:
@@ -111,7 +118,10 @@ SENSORS: tuple[HaClimateSensorDescription, ...] = (
         suggested_display_precision=3,
         icon="mdi:chart-bell-curve-cumulative",
         value_fn=_baseline_value,
-        attrs_fn=_attrs_baseline,
+        attrs_fn=lambda c, d: {
+            **_attrs_baseline(c, d),
+            "betrouwbaar": bool(c.baseline and c.baseline.reliable),
+        },
     ),
     HaClimateSensorDescription(
         key="expected_gas_today",
@@ -150,22 +160,17 @@ SENSORS: tuple[HaClimateSensorDescription, ...] = (
         **GAS,
     ),
     HaClimateSensorDescription(
-        key="saved_gas_total",
-        translation_key="saved_gas_total",
-        value_fn=lambda c, d: d.saved_total,
-        attrs_fn=_attrs_total,
-        **GAS,
-    ),
-    HaClimateSensorDescription(
         key="saved_money_today",
         translation_key="saved_money_today",
         value_fn=lambda c, d: c.to_euro(d.saved_today),
+        attrs_fn=_attrs_price,
         **EURO,
     ),
     HaClimateSensorDescription(
         key="saved_money_yesterday",
         translation_key="saved_money_yesterday",
         value_fn=lambda c, d: c.to_euro(d.saved_yesterday),
+        attrs_fn=_attrs_price,
         **EURO,
     ),
     HaClimateSensorDescription(
@@ -185,7 +190,15 @@ async def async_setup_entry(
 ) -> None:
     """Set up the sensors."""
     coordinator = entry.runtime_data
-    async_add_entities(HaClimateSensor(coordinator, desc) for desc in SENSORS)
+    entities: list[SensorEntity] = [
+        HaClimateSensor(coordinator, desc) for desc in SENSORS
+    ]
+    entities.append(SavedGasTotalSensor(coordinator))
+    for room in coordinator.rooms:
+        entities.extend(
+            RoomModelSensor(coordinator, room, desc) for desc in ROOM_SENSORS
+        )
+    async_add_entities(entities)
 
 
 class HaClimateSensor(HaClimateEntity, SensorEntity):
@@ -217,3 +230,148 @@ class HaClimateSensor(HaClimateEntity, SensorEntity):
 
 def _round(value: float | None, digits: int) -> float | None:
     return round(value, digits) if value is not None else None
+
+
+class SavedGasTotalSensor(HaClimateEntity, RestoreSensor):
+    """Cumulative gas savings, restored after a restart."""
+
+    _attr_translation_key = "saved_gas_total"
+    _attr_native_unit_of_measurement = UnitOfVolume.CUBIC_METERS
+    _attr_device_class = SensorDeviceClass.GAS
+    _attr_state_class = SensorStateClass.TOTAL
+    _attr_suggested_display_precision = 2
+
+    def __init__(self, coordinator: HaClimateCoordinator) -> None:
+        """Initialize the sensor."""
+        super().__init__(coordinator, "saved_gas_total")
+        self._restored: float | None = None
+
+    async def async_added_to_hass(self) -> None:
+        """Restore the last known total."""
+        await super().async_added_to_hass()
+        value: Any = None
+        if (last := await self.async_get_last_sensor_data()) is not None:
+            value = last.native_value
+        elif (last_state := await self.async_get_last_state()) is not None:
+            value = last_state.state
+        try:
+            self._restored = float(value) if value is not None else None
+        except (TypeError, ValueError):
+            self._restored = None
+        if self._restored is not None:
+            self.coordinator.restore_saved_total(self._restored)
+            await self.coordinator.async_request_refresh()
+
+    @property
+    def native_value(self) -> float | None:
+        """Return the cumulative savings."""
+        data = self.coordinator.data
+        if data is None or data.saved_total is None:
+            return self._restored
+        return data.saved_total
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any] | None:
+        """Return extra attributes."""
+        if self.coordinator.data is None:
+            return None
+        return _attrs_total(self.coordinator, self.coordinator.data)
+
+
+# ---------------------------------------------------------------------------
+# Thermal model sensors per room
+# ---------------------------------------------------------------------------
+@dataclass(frozen=True, kw_only=True)
+class RoomSensorDescription(SensorEntityDescription):
+    """Describes a per-room sensor."""
+
+    value_fn: Callable[[HaClimateCoordinator, dict[str, Any]], Any]
+
+
+def _delta_t(c: HaClimateCoordinator, room: dict[str, Any]) -> float | None:
+    inside = c.room_measurements(room)["current_temperature"]
+    outside = c.outdoor_temperature()
+    if inside is None or outside is None:
+        return None
+    return inside - outside
+
+
+def _rounded(value: float | None, digits: int = 3) -> float | None:
+    return round(value, digits) if value is not None else None
+
+
+ROOM_SENSORS: tuple[RoomSensorDescription, ...] = (
+    RoomSensorDescription(
+        key="cooling_rate",
+        translation_key="room_cooling_rate",
+        native_unit_of_measurement="°C/h",
+        suggested_display_precision=2,
+        entity_category=EntityCategory.DIAGNOSTIC,
+        value_fn=lambda c, r: _rounded(
+            c.model(r[CONF_ROOM_ID]).estimate.cooling_rate(_delta_t(c, r))
+        ),
+    ),
+    RoomSensorDescription(
+        key="heating_rate",
+        translation_key="room_heating_rate",
+        native_unit_of_measurement="°C/h",
+        suggested_display_precision=2,
+        entity_category=EntityCategory.DIAGNOSTIC,
+        value_fn=lambda c, r: _rounded(
+            c.model(r[CONF_ROOM_ID]).estimate.heating_rate(_delta_t(c, r))
+        ),
+    ),
+    RoomSensorDescription(
+        key="model_confidence",
+        translation_key="room_model_confidence",
+        native_unit_of_measurement=PERCENTAGE,
+        state_class=SensorStateClass.MEASUREMENT,
+        suggested_display_precision=0,
+        entity_category=EntityCategory.DIAGNOSTIC,
+        value_fn=lambda c, r: c.model(r[CONF_ROOM_ID]).estimate.confidence,
+    ),
+    RoomSensorDescription(
+        key="heating_start",
+        translation_key="room_heating_start",
+        device_class=SensorDeviceClass.TIMESTAMP,
+        value_fn=lambda c, r: c.next_heating_start(r),
+    ),
+)
+
+
+class RoomModelSensor(HaClimateEntity, SensorEntity):
+    """Thermal model value of a room."""
+
+    entity_description: RoomSensorDescription
+
+    def __init__(
+        self,
+        coordinator: HaClimateCoordinator,
+        room: dict[str, Any],
+        description: RoomSensorDescription,
+    ) -> None:
+        """Initialize the sensor."""
+        super().__init__(coordinator, f"{description.key}_{room[CONF_ROOM_ID]}")
+        self.entity_description = description
+        self._room = room
+        self._attr_translation_placeholders = {"room": room[CONF_ROOM_NAME]}
+
+    @property
+    def native_value(self) -> Any:
+        """Return the value."""
+        return self.entity_description.value_fn(self.coordinator, self._room)
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any] | None:
+        """Return model details."""
+        estimate = self.coordinator.model(self._room[CONF_ROOM_ID]).estimate
+        attrs: dict[str, Any] = {
+            "afkoelcoefficient_per_uur": _rounded(estimate.cooling_coefficient, 4),
+            "verwarmingsvermogen_c_per_uur": _rounded(estimate.heating_power),
+            "betrouwbaarheid_afkoelen": estimate.cooling_confidence,
+            "betrouwbaarheid_opwarmen": estimate.heating_confidence,
+            "meetmomenten": estimate.observations,
+        }
+        if self.entity_description.key == "heating_start":
+            attrs.update(self.coordinator.plans.get(self._room[CONF_ROOM_ID], {}))
+        return attrs
