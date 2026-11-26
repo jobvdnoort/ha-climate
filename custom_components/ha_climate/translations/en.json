@@ -109,13 +109,15 @@
           "night_temp": "Fixed night temperature (optional)",
           "comfort_time": "At temperature by",
           "optimum_start": "Optimum start",
-          "aircos": "Air conditioners (cooling / quick heating)"
+          "aircos": "Air conditioners (cooling / quick heating)",
+          "valves": "Valve position sensors (%)"
         },
         "data_description": {
           "use_global_night": "Turn off to use the times and setback below for this room.",
           "night_temp": "When set, this temperature is used at night instead of the relative setback.",
           "optimum_start": "Start heating automatically based on the learned thermal model so the room reaches the day temperature at the set time.",
-          "aircos": "Optional. Air conditioners are not part of the night setback, schedules or optimum start; periods in which one heats or cools are excluded from the floor heating model."
+          "aircos": "Optional. Air conditioners are not part of the night setback, schedules or optimum start; periods in which one heats or cools are excluded from the floor heating model.",
+          "valves": "Optional. Valve position / actuator sensors (0–100 %) of the floor heating loops. When set, the mean valve opening is used as heating intensity for the heating share and the thermal model."
         }
       },
       "room": {
@@ -132,13 +134,15 @@
           "night_temp": "Fixed night temperature (optional)",
           "comfort_time": "At temperature by",
           "optimum_start": "Optimum start",
-          "aircos": "Air conditioners (cooling / quick heating)"
+          "aircos": "Air conditioners (cooling / quick heating)",
+          "valves": "Valve position sensors (%)"
         },
         "data_description": {
           "use_global_night": "Turn off to use the times and setback below for this room.",
           "night_temp": "When set, this temperature is used at night instead of the relative setback.",
           "optimum_start": "Start heating automatically based on the learned thermal model so the room reaches the day temperature at the set time.",
-          "aircos": "Optional. Air conditioners are not part of the night setback, schedules or optimum start; periods in which one heats or cools are excluded from the floor heating model."
+          "aircos": "Optional. Air conditioners are not part of the night setback, schedules or optimum start; periods in which one heats or cools are excluded from the floor heating model.",
+          "valves": "Optional. Valve position / actuator sensors (0–100 %) of the floor heating loops. When set, the mean valve opening is used as heating intensity for the heating share and the thermal model."
         }
       },
       "edit_room": {

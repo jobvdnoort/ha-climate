@@ -21,6 +21,7 @@ def _load(name: str):
 
 calc = _load("calculations")
 thermal = _load("thermal")
+boiler = _load("boiler")
 
 
 @pytest.fixture

@@ -30,6 +30,9 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import (
     ATTR_ENTITY_ID,
     ATTR_TEMPERATURE,
+    ATTR_UNIT_OF_MEASUREMENT,
+    STATE_OFF,
+    STATE_ON,
     STATE_UNAVAILABLE,
     STATE_UNKNOWN,
 )
@@ -45,6 +48,15 @@ from homeassistant.helpers.storage import Store
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 from homeassistant.util import dt as dt_util
 
+from .boiler import (
+    BoilerTracker,
+    hours_from,
+    is_cycling,
+    minutes_from,
+    pressure_status,
+    summarize_day,
+    valve_stats,
+)
 from .calculations import (
     BaselineResult,
     DayRecord,
@@ -69,6 +81,20 @@ from .calculations import (
 from .const import (
     BASELINE_MIN_DAYS,
     BASELINE_MIN_DEGREE_DAYS,
+    BOILER_KEYS,
+    BOILER_TRACE_HOURS,
+    BOILER_TRACE_STEP,
+    CONF_BOILER_AVG_RUNTIME,
+    CONF_BOILER_DHW,
+    CONF_BOILER_ERROR,
+    CONF_BOILER_FLAME,
+    CONF_BOILER_FLOW_SETPOINT,
+    CONF_BOILER_FLOW_TEMP,
+    CONF_BOILER_HEAT_REQUEST,
+    CONF_BOILER_HOURS_TODAY,
+    CONF_BOILER_MODULATION,
+    CONF_BOILER_PRESSURE,
+    CONF_BOILER_STARTS_TODAY,
     CONF_BASELINE_DAYS,
     CONF_COMFORT_TIME,
     CONF_DAY_TEMP,
@@ -93,6 +119,7 @@ from .const import (
     CONF_ROOM_ID,
     CONF_ROOM_NAME,
     CONF_ROOM_USE_GLOBAL,
+    CONF_ROOM_VALVES,
     CONF_ROOMS,
     CONF_SAVINGS_START,
     AIRCO_ACTIVE_ACTIONS,
@@ -119,7 +146,7 @@ from .const import (
     STORAGE_VERSION,
     UPDATE_INTERVAL,
 )
-from .recorder_history import async_backfill_observations
+from .recorder_history import async_backfill_observations, async_boiler_trace
 from .statistics import async_daily_history, async_first_overlap, async_period_value
 from .thermal import (
     PreheatPlan,
@@ -142,6 +169,15 @@ def _float_or_none(value: Any) -> float | None:
         return float(value)
     except (TypeError, ValueError):
         return None
+
+
+def _on_off(value: Any) -> bool | None:
+    """Convert a binary state to bool (None when unknown)."""
+    if value == STATE_ON:
+        return True
+    if value == STATE_OFF:
+        return False
+    return None
 
 
 def _mean(values: list[float | None]) -> float | None:
@@ -228,6 +264,7 @@ class HaClimateCoordinator(DataUpdateCoordinator[EnergyData]):
             rise_window=FIREPLACE_RISE_WINDOW,
             heating_cooldown=FIREPLACE_HEATING_COOLDOWN,
         )
+        self.boiler = BoilerTracker(track_flame=bool(self.config.get(CONF_BOILER_FLAME)))
 
     # ------------------------------------------------------------------
     # Configuration helpers
@@ -255,6 +292,30 @@ class HaClimateCoordinator(DataUpdateCoordinator[EnergyData]):
     def fireplace_configured(self) -> bool:
         """Return whether a fireplace thermostat is configured."""
         return bool(self.config.get(CONF_FIREPLACE_CLIMATE))
+
+    # ---- boiler (optional) --------------------------------------------
+    @property
+    def boiler_configured(self) -> bool:
+        """Return whether any boiler (OpenTherm) entity is configured."""
+        return any(self.config.get(key) for key in BOILER_KEYS)
+
+    def _state_value(self, key: str) -> Any:
+        if not (entity_id := self.config.get(key)):
+            return None
+        state = self.hass.states.get(entity_id)
+        return state.state if state is not None else None
+
+    def _boiler_float(self, key: str) -> float | None:
+        return _float_or_none(self._state_value(key))
+
+    def _boiler_bool(self, key: str) -> bool | None:
+        return _on_off(self._state_value(key))
+
+    def _boiler_unit(self, key: str) -> str | None:
+        if not (entity_id := self.config.get(key)):
+            return None
+        state = self.hass.states.get(entity_id)
+        return state.attributes.get(ATTR_UNIT_OF_MEASUREMENT) if state else None
 
     def schedule(self, room: dict[str, Any]) -> RoomSchedule:
         """Return the effective schedule of a room."""
@@ -307,6 +368,10 @@ class HaClimateCoordinator(DataUpdateCoordinator[EnergyData]):
         history.setdefault("overlap_start", None)
         history.setdefault("indoor", {})  # day -> [Σ measured, n, Σ target, n]
         history.setdefault("events", [])  # [{"ts", "type", "room", "text"}]
+        history.setdefault("boiler", {})  # {"days": {day: {...}}}
+        self.boiler = BoilerTracker.from_dict(
+            history["boiler"], track_flame=bool(self.config.get(CONF_BOILER_FLAME))
+        )
         stored.setdefault("frozen_baseline", None)
         stored.setdefault("night_signature", None)
         # Migrate models from the old single storage file. The history is
@@ -415,6 +480,11 @@ class HaClimateCoordinator(DataUpdateCoordinator[EnergyData]):
         self._history["models"].update(
             {room_id: model.as_dict() for room_id, model in self.models.items()}
         )
+        if self.boiler.days:
+            self.boiler.prune(
+                (dt_util.now().date() - timedelta(days=HISTORY_RETENTION_DAYS)).isoformat()
+            )
+            self._history["boiler"] = self.boiler.as_dict()
         return self._history
 
     def _prune_history(self) -> None:
@@ -454,6 +524,18 @@ class HaClimateCoordinator(DataUpdateCoordinator[EnergyData]):
             self._unsub.append(
                 async_track_state_change_event(
                     self.hass, tracked, self._async_fireplace_state_changed
+                )
+            )
+        boiler_tracked = [
+            entity
+            for entity in (self.config.get(CONF_BOILER_FLAME), self.config.get(CONF_BOILER_DHW))
+            if entity
+        ]
+        if boiler_tracked:
+            # Burner starts are counted on every change, not only once a minute.
+            self._unsub.append(
+                async_track_state_change_event(
+                    self.hass, boiler_tracked, self._async_boiler_state_changed
                 )
             )
         self._unsub.append(async_at_started(self.hass, self._async_started))
@@ -542,9 +624,118 @@ class HaClimateCoordinator(DataUpdateCoordinator[EnergyData]):
                 minutes = self._stored["fireplace_minutes"]
                 minutes[day] = minutes.get(day, 0) + 1
                 self._async_save()
+        if self.boiler_configured:
+            self._track_boiler(now, sample=True)
         self._learn(now)
         await self._async_evaluate_setback(now)
         self.async_update_listeners()
+
+    # ------------------------------------------------------------------
+    # Boiler (OpenTherm)
+    # ------------------------------------------------------------------
+    @callback
+    def _async_boiler_state_changed(self, event: Event) -> None:
+        self._track_boiler(dt_util.as_local(event.time_fired))
+
+    def _track_boiler(self, now: datetime, sample: bool = False) -> None:
+        """Follow the burner/DHW status and keep the daily statistics."""
+        now = dt_util.as_local(now)
+        self.boiler.update(
+            now, self._boiler_bool(CONF_BOILER_FLAME), self._boiler_bool(CONF_BOILER_DHW)
+        )
+        if not sample:
+            return
+        self.boiler.sample(
+            now,
+            self._boiler_float(CONF_BOILER_FLOW_TEMP),
+            self._boiler_float(CONF_BOILER_MODULATION),
+        )
+        record = self.boiler.day(now.date().isoformat())
+        external = self._boiler_external()
+        for key, value in (
+            ("ext_starts", external["starts"]),
+            ("ext_hours", external["burn_hours"]),
+            ("ext_avg", external["avg_run_minutes"]),
+        ):
+            if value is not None:
+                record[key] = value
+        # Minute counters change constantly; the delayed save batches them.
+        if now.minute % 15 == 0:
+            self._async_save_history()
+
+    def _boiler_external(self) -> dict[str, float | None]:
+        """Values of the boiler's own counters (optional entities)."""
+        return {
+            "starts": self._boiler_float(CONF_BOILER_STARTS_TODAY),
+            "burn_hours": hours_from(
+                self._boiler_float(CONF_BOILER_HOURS_TODAY),
+                self._boiler_unit(CONF_BOILER_HOURS_TODAY),
+            ),
+            "avg_run_minutes": minutes_from(
+                self._boiler_float(CONF_BOILER_AVG_RUNTIME),
+                self._boiler_unit(CONF_BOILER_AVG_RUNTIME),
+            ),
+        }
+
+    def boiler_day(self, day: date) -> dict[str, Any]:
+        """KPIs of one day (own tracking, the boiler's counters win)."""
+        return summarize_day(self.boiler.days.get(day.isoformat()))
+
+    def boiler_status(self) -> dict[str, Any] | None:
+        """Live status and today's KPIs (None when no boiler is configured)."""
+        if not self.boiler_configured:
+            return None
+        cfg = self.config
+        now = dt_util.now()
+        today = self.boiler_day(now.date())
+        pressure = self._boiler_float(CONF_BOILER_PRESSURE)
+        error = self._state_value(CONF_BOILER_ERROR)
+        if error in (STATE_UNKNOWN, STATE_UNAVAILABLE):
+            error = None
+        valves = [
+            m["valve_max"]
+            for room in self.rooms
+            if (m := self.room_measurements(room))["valve_max"] is not None
+        ]
+        return {
+            "entities": {key: cfg.get(key) for key in BOILER_KEYS},
+            "flame": self._boiler_bool(CONF_BOILER_FLAME),
+            "heat_request": self._boiler_bool(CONF_BOILER_HEAT_REQUEST),
+            "dhw": self._boiler_bool(CONF_BOILER_DHW),
+            "modulation": self._boiler_float(CONF_BOILER_MODULATION),
+            "flow_temperature": self._boiler_float(CONF_BOILER_FLOW_TEMP),
+            "flow_setpoint": self._boiler_float(CONF_BOILER_FLOW_SETPOINT),
+            "pressure": pressure,
+            "pressure_status": pressure_status(pressure),
+            "error": error,
+            "current_run_minutes": self.boiler.current_run_minutes(now),
+            "max_valve": max(valves) if valves else None,
+            "today": today,
+            "cycling": is_cycling(today["starts"], today["avg_run_minutes"]),
+            "tracking_flame": bool(cfg.get(CONF_BOILER_FLAME)),
+        }
+
+    async def async_boiler_trace(self) -> list[dict[str, Any]]:
+        """Last 24 h of flow temperature, setpoint, modulation and max valve."""
+        cfg = self.config
+        numeric = {
+            column: cfg[key]
+            for column, key in (
+                ("flow", CONF_BOILER_FLOW_TEMP),
+                ("setpoint", CONF_BOILER_FLOW_SETPOINT),
+                ("modulation", CONF_BOILER_MODULATION),
+            )
+            if cfg.get(key)
+        }
+        binary = {
+            column: cfg[key]
+            for column, key in (("flame", CONF_BOILER_FLAME), ("dhw", CONF_BOILER_DHW))
+            if cfg.get(key)
+        }
+        valves = [v for room in self.rooms for v in room.get(CONF_ROOM_VALVES, [])]
+        return await async_boiler_trace(
+            self.hass, numeric, binary, valves, BOILER_TRACE_HOURS, BOILER_TRACE_STEP
+        )
 
     async def _async_nightly_baseline(self, _now: datetime) -> None:
         await self.async_recalculate_baseline()
@@ -579,9 +770,23 @@ class HaClimateCoordinator(DataUpdateCoordinator[EnergyData]):
         aircos = [self._climate_info(e) for e in room.get(CONF_ROOM_AIRCOS, [])]
         available = [loop for loop in loops if loop.get("available")]
         actions = [loop["hvac_action"] for loop in available if loop.get("hvac_action")]
+        valves = []
+        for entity_id in room.get(CONF_ROOM_VALVES, []):
+            state = self.hass.states.get(entity_id)
+            valves.append(
+                {
+                    "entity_id": entity_id,
+                    "name": state.attributes.get("friendly_name", entity_id) if state else entity_id,
+                    "position": _float_or_none(state.state) if state else None,
+                }
+            )
+        valve_mean, valve_max = valve_stats([v["position"] for v in valves])
         return {
             "loops": loops,
             "aircos": aircos,
+            "valves": valves,
+            "valve": valve_mean,
+            "valve_max": valve_max,
             "current_temperature": _mean([loop["current_temperature"] for loop in available]),
             "target_temperature": _mean([loop["target_temperature"] for loop in available]),
             "heating": (any(a in HEATING_ACTIONS for a in actions) if actions else None),
@@ -628,8 +833,12 @@ class HaClimateCoordinator(DataUpdateCoordinator[EnergyData]):
                 (self.room_has_fireplace(room) and self.fireplace.active)
                 or measured["airco_active"]
             )
+            # With valve sensors the mean opening is the heating intensity.
+            heating = (
+                measured["valve"] / 100 if measured["valve"] is not None else measured["heating"]
+            )
             if self.model(room[CONF_ROOM_ID]).add_sample(
-                now, measured["current_temperature"], outside, measured["heating"], valid
+                now, measured["current_temperature"], outside, heating, valid
             ):
                 learned = True
         if indoor or targets:
@@ -1224,6 +1433,7 @@ class HaClimateCoordinator(DataUpdateCoordinator[EnergyData]):
                     outdoor,
                     fireplace,
                     aircos=room.get(CONF_ROOM_AIRCOS, []),
+                    valves=room.get(CONF_ROOM_VALVES, []),
                 )
             except Exception:  # noqa: BLE001
                 _LOGGER.exception("Reading recorder history for %s failed", room[CONF_ROOM_NAME])
@@ -1292,6 +1502,7 @@ class HaClimateCoordinator(DataUpdateCoordinator[EnergyData]):
         start = self.savings_start
         rows: list[dict[str, Any]] = []
         cumulative = 0.0
+        boiler = self.boiler_configured
 
         def row(day: date, mean, dd, gas, expected, saved, **extra) -> dict[str, Any]:
             nonlocal cumulative
@@ -1324,6 +1535,7 @@ class HaClimateCoordinator(DataUpdateCoordinator[EnergyData]):
                     {"time": e["ts"], "type": e["type"], "text": e["text"]}
                     for e in events.get(day.isoformat(), [])
                 ],
+                **({"boiler": self.boiler_day(day)} if boiler else {}),
                 **extra,
             }
 

@@ -32,6 +32,32 @@ const COLORS = {
   cost: "#8d6e63",
   cooling: "#42a5f5",
   heating: "#ef5350",
+  flow: "#ef5350",
+  setpoint: "#ffa726",
+  modulation: "#ab47bc",
+  valve: "#26a69a",
+  dhw: "#29b6f6",
+  heat: "#ff7043",
+};
+
+const BOILER_FIELDS = [
+  { key: "boiler_flame", label: "Brander / vlamstatus", domain: "binary_sensor", hint: "bijv. cv_vlam_status" },
+  { key: "boiler_heat_request", label: "Warmtevraag", domain: "binary_sensor", hint: "bijv. ot_heat_request" },
+  { key: "boiler_dhw", label: "Tapwater / warm water status", domain: "binary_sensor", hint: "bijv. cv_warm_water_status" },
+  { key: "boiler_modulation", label: "Modulatie (%)", domain: "sensor", hint: "bijv. cv_degree_of_modulation" },
+  { key: "boiler_flow_temp", label: "Werkelijke aanvoertemperatuur (°C)", domain: "sensor", hint: "bijv. cv_h1_water_temperatuur" },
+  { key: "boiler_flow_setpoint", label: "Gevraagde aanvoertemperatuur (°C)", domain: "sensor", hint: "bijv. cv_h1_flow_setpoint_value" },
+  { key: "boiler_pressure", label: "Waterdruk (bar)", domain: "sensor", hint: "bijv. cv_waterdruk" },
+  { key: "boiler_error", label: "Foutcode", domain: "sensor", hint: "bijv. cv_error_code" },
+  { key: "boiler_starts_today", label: "Starts vandaag (optioneel)", domain: "sensor", hint: "anders zelf geteld" },
+  { key: "boiler_hours_today", label: "Branduren vandaag (optioneel)", domain: "sensor", hint: "anders zelf berekend" },
+  { key: "boiler_avg_runtime", label: "Gem. looptijd (optioneel)", domain: "sensor", hint: "anders zelf berekend" },
+];
+
+const minutesText = (value) => {
+  if (value === null || value === undefined) return "–";
+  if (value < 60) return `${fmt(value, 0)} min`;
+  return `${Math.floor(value / 60)}u ${String(Math.round(value % 60)).padStart(2, "0")}m`;
 };
 
 const esc = (value) =>
@@ -99,6 +125,7 @@ class HaClimatePanel extends HTMLElement {
     this._pendingTemp = {};
     this._pendingAirco = {};
     this._tempTimers = {};
+    this._boilerTrace = null;
   }
 
   /* ---------- Home Assistant properties ---------- */
@@ -174,8 +201,12 @@ class HaClimatePanel extends HTMLElement {
 
   async _loadHistory() {
     try {
-      const result = await this._ws({ type: "ha_climate/history", days: this._days });
+      const [result, trace] = await Promise.all([
+        this._ws({ type: "ha_climate/history", days: this._days }),
+        this._state?.boiler ? this._ws({ type: "ha_climate/boiler/trace" }).catch(() => ({ points: [] })) : null,
+      ]);
       this._history = result.days;
+      this._boilerTrace = trace ? trace.points : null;
     } catch (err) {
       this._history = [];
       this._toast(err?.message || "Kon historie niet laden", true);
@@ -330,6 +361,7 @@ class HaClimatePanel extends HTMLElement {
           <div class="row small"><span>Nacht</span><span>${room.schedule.night_start} – ${room.schedule.optimum_start ? room.schedule.comfort_time : room.schedule.night_end},
             ${room.schedule.night_temp !== null ? fmt(room.schedule.night_temp, 1, "°C") : fmt(room.schedule.night_offset, 1, "°C")}</span></div>
           ${preheat}
+          ${room.valves && room.valves.length ? this._renderValves(room) : ""}
           ${room.aircos && room.aircos.length ? this._renderAirco(room, admin) : ""}
           <div class="row small"><span>Model</span><span>${this._confidenceBar(room.model.confidence)}</span></div>
           <details><summary>${room.loops.length} lus${room.loops.length === 1 ? "" : "sen"}</summary><ul class="loops">${loops}</ul></details>
@@ -371,6 +403,17 @@ class HaClimatePanel extends HTMLElement {
     `;
   }
 
+  _renderValves(room) {
+    const v = room.valve;
+    const width = Math.max(0, Math.min(100, v ?? 0));
+    const detail = room.valves
+      .map((x) => `${esc(x.name || x.entity_id)}: ${x.position === null || x.position === undefined ? "–" : fmt(x.position, 0, "%")}`)
+      .join("&#10;");
+    const max = room.valves.length > 1 && room.valve_max !== null ? ` · max ${fmt(room.valve_max, 0, "%")}` : "";
+    return `<div class="row small" title="${detail}"><span>Klepstand</span>
+      <span class="conf"><span class="conf-bar"><span style="width:${width}%;background:${COLORS.valve}"></span></span>${v === null || v === undefined ? "–" : fmt(v, 0, "%")}${max}</span></div>`;
+  }
+
   _renderAirco(room, admin) {
     const MODES = { off: "Uit", cool: "Koelen", heat: "Verwarmen", heat_cool: "Auto", auto: "Auto", dry: "Drogen", fan_only: "Ventilator" };
     const ACTIONS = { cooling: "koelt", heating: "verwarmt", idle: "inactief", off: "uit", drying: "droogt", fan: "ventileert" };
@@ -409,6 +452,14 @@ class HaClimatePanel extends HTMLElement {
       this._state.rooms.filter((r) => r.id !== room.id).flatMap((r) => [...r.climates, ...(r.config.aircos || [])])
     );
     const roomAircos = d.aircos || room.config?.aircos || [];
+    const roomValves = room.config?.valves || [];
+    const usedValves = new Set(this._state.rooms.filter((r) => r.id !== room.id).flatMap((r) => r.config.valves || []));
+    const valveSensors = this._entities(
+      (s) =>
+        s.entity_id.startsWith("sensor.") &&
+        (roomValves.includes(s.entity_id) ||
+          (s.attributes.unit_of_measurement === "%" && !["battery", "humidity", "moisture"].includes(s.attributes.device_class)))
+    );
     const climates = this._entities((s) => s.entity_id.startsWith("climate."));
     const list = climates
       .map((c) => {
@@ -437,6 +488,17 @@ class HaClimatePanel extends HTMLElement {
             })
             .join("")}</div>
           <p class="muted small">Airco's doen niet mee met nachtverlaging, schema's of optimum start. Als een airco verwarmt of koelt, wordt die periode uitgesloten van het vloerverwarmingsmodel.</p>
+          <label class="field"><span>Klepstand / stelgraad-sensoren (%) – optioneel</span></label>
+          <div class="checklist short" id="valve-list">${valveSensors.length ? valveSensors
+            .map((c) => {
+              const used = usedValves.has(c.id);
+              const state = this._hass.states[c.id];
+              return `<label class="check ${used ? "disabled" : ""}" data-name="${esc(c.name.toLowerCase())} ${esc(c.id)}">
+                <input type="checkbox" name="valve" value="${esc(c.id)}" ${roomValves.includes(c.id) ? "checked" : ""} ${used ? "disabled" : ""}>
+                <span>${esc(c.name)}<br><small class="muted">${esc(c.id)} · ${esc(state?.state ?? "–")} %${used ? " · in andere kamer" : ""}</small></span></label>`;
+            })
+            .join("") : '<p class="muted small">Geen sensoren met eenheid % gevonden.</p>'}</div>
+          <p class="muted small">Bijv. KNX- of vloerverwarmingsactoren (0–100 %). Indien gekoppeld gebruikt HA Climate de gemiddelde klepopening voor het stookpercentage en het thermische model (opwarmsnelheid).</p>
           <p class="muted small">De schema's (dag-/nachttemperatuur, tijden, optimum start) stel je in op het tabblad Schema's.</p>
           <div class="actions">
             <button class="btn text" data-action="close-dialog">Annuleren</button>
@@ -521,7 +583,100 @@ class HaClimatePanel extends HTMLElement {
         <div class="chart" id="chart-savings"></div>
         <p class="muted small">${b.savings_start ? `Cumulatief vanaf de startdatum ${dateLabel(b.savings_start)} (begint op 0). ` : ""}${b.frozen ? `Vergeleken met de bevroren baseline van ${fmt(b.frozen.m3_per_degree_day, 3)} m³/graaddag. ` : ""}Besparing = verwacht (baseline × graaddagen) − werkelijk, opgeteld over de gekozen periode en omgerekend met de variabele gasprijs (vaste leveringskosten tellen niet mee). Dagen met nachtverlaging zijn gemarkeerd.</p>
       </div>
+      ${s.boiler ? this._renderBoiler() : ""}
       ${this._renderModelSection()}`;
+  }
+
+  /* ----- Boiler & efficiency (only when configured) ----- */
+  _renderBoiler() {
+    const b = this._state.boiler;
+    const t = b.today || {};
+    const rows = (this._history || []).filter((r) => r.boiler);
+    const ent = b.entities || {};
+    const onOff = (value, on, off) => (value === null || value === undefined ? "–" : value ? on : off);
+    const flameChip = b.flame === null || b.flame === undefined
+      ? ""
+      : `<span class="chip" style="--chip:${b.flame ? (b.dhw ? COLORS.dhw : COLORS.heat) : "#9e9e9e"}">${b.flame ? (b.dhw ? "Brandt · tapwater" : "Brandt · verwarming") : "Uit"}</span>`;
+    const pressureColor = { low: "#e53935", high: "#fb8c00", ok: "#43a047" }[b.pressure_status] || "#9e9e9e";
+    const pressureText = { low: "te laag – bijvullen", high: "hoog", ok: "in orde" }[b.pressure_status] || "";
+    const errorOk = b.error === null || b.error === undefined || ["0", "none", "geen", "ok", "no error", "off"].includes(String(b.error).toLowerCase());
+    const status = [];
+    if (ent.boiler_flame) status.push(`<div class="bstat"><span class="muted small">Brander</span>${flameChip}
+      ${b.current_run_minutes !== null && b.current_run_minutes !== undefined ? `<span class="muted small">loopt ${minutesText(b.current_run_minutes)}</span>` : ""}</div>`);
+    if (ent.boiler_heat_request) status.push(`<div class="bstat"><span class="muted small">Warmtevraag</span><b>${onOff(b.heat_request, "Ja", "Nee")}</b></div>`);
+    if (ent.boiler_dhw && !ent.boiler_flame) status.push(`<div class="bstat"><span class="muted small">Tapwater</span><b>${onOff(b.dhw, "Actief", "Niet actief")}</b></div>`);
+    if (ent.boiler_modulation) status.push(`<div class="bstat"><span class="muted small">Modulatie</span><b>${fmt(b.modulation, 0, "%")}</b></div>`);
+    if (ent.boiler_flow_temp || ent.boiler_flow_setpoint) {
+      const diff = b.flow_temperature !== null && b.flow_setpoint !== null && b.flow_temperature !== undefined && b.flow_setpoint !== undefined
+        ? b.flow_temperature - b.flow_setpoint : null;
+      status.push(`<div class="bstat"><span class="muted small">Aanvoer / gevraagd</span><b>${fmt(b.flow_temperature, 1, "°C")} / ${fmt(b.flow_setpoint, 1, "°C")}</b>
+        ${diff !== null ? `<span class="muted small">${diff >= 0 ? "+" : ""}${fmt(diff, 1, "°C")}</span>` : ""}</div>`);
+    }
+    if (ent.boiler_pressure) status.push(`<div class="bstat"><span class="muted small">Waterdruk</span>
+      <span class="chip" style="--chip:${pressureColor}">${fmt(b.pressure, 1, "bar")}</span><span class="muted small">${pressureText}</span></div>`);
+    if (ent.boiler_error) status.push(`<div class="bstat"><span class="muted small">Foutcode</span>
+      <span class="chip" style="--chip:${errorOk ? "#43a047" : "#e53935"}">${errorOk ? "Geen storing" : esc(b.error)}</span></div>`);
+    if (b.max_valve !== null && b.max_valve !== undefined) status.push(`<div class="bstat"><span class="muted small">Hoogste klepstand</span><b>${fmt(b.max_valve, 0, "%")}</b></div>`);
+
+    // Period figures (completed + today's partial days).
+    const sum = (key) => rows.reduce((acc, r) => acc + (r.boiler[key] ?? 0), 0);
+    const daysWithStarts = rows.filter((r) => r.boiler.starts !== null && r.boiler.starts !== undefined);
+    const periodStarts = sum("starts");
+    const periodHours = sum("burn_hours");
+    const runWeighted = rows.reduce((acc, r) => acc + (r.boiler.avg_run_minutes ?? 0) * (r.boiler.starts ?? 0), 0);
+    const periodAvgRun = periodStarts ? runWeighted / periodStarts : null;
+    const periodDhw = sum("dhw_minutes");
+    const periodHeat = sum("heat_minutes");
+    const flowRows = rows.filter((r) => r.boiler.flow_avg !== null && r.boiler.flow_avg !== undefined);
+    const periodFlow = flowRows.length ? flowRows.reduce((a, r) => a + r.boiler.flow_avg, 0) / flowRows.length : null;
+    const cyclingPeriod = periodStarts >= 3 && periodAvgRun !== null && periodAvgRun < 10;
+    const tile = (title, value, sub, warn = false) => `<div class="tile ${warn ? "warn" : ""}"><div class="muted small">${title}</div><div class="mid">${value}</div><div class="muted small">${sub}</div></div>`;
+    const kpis = [
+      tile("Branderstarts vandaag", t.starts ?? "–", daysWithStarts.length ? `gem. ${fmt(periodStarts / daysWithStarts.length, 1)} per dag (${daysWithStarts.length} d)` : ""),
+      tile("Branduren vandaag", t.burn_hours !== null && t.burn_hours !== undefined ? `${fmt(t.burn_hours, 1)}<small>uur</small>` : "–", rows.length ? `${fmt(periodHours, 1)} uur in ${this._days} d` : ""),
+      tile("Gem. looptijd per start", minutesText(t.avg_run_minutes),
+        b.cycling ? "⚠ pendelen: korte branderruns (&lt; 10 min)" : `${t.short_runs ? `${t.short_runs} korte runs vandaag · ` : ""}periode ${minutesText(periodAvgRun)}${cyclingPeriod ? " ⚠" : ""}`,
+        b.cycling),
+      tile("Gem. aanvoertemperatuur", t.flow_avg !== null && t.flow_avg !== undefined ? `${fmt(t.flow_avg, 1)}<small>°C</small>` : "–",
+        `tijdens branden${periodFlow !== null ? ` · periode ${fmt(periodFlow, 1, "°C")}` : ""}${t.modulation_avg !== null && t.modulation_avg !== undefined ? ` · modulatie ${fmt(t.modulation_avg, 0, "%")}` : ""}`),
+    ].join("");
+
+    const split = (dhw, heat) => {
+      const total = (dhw ?? 0) + (heat ?? 0);
+      if (!total) return '<span class="muted small">nog geen branduren</span>';
+      const pct = (dhw / total) * 100;
+      return `<div class="split"><span style="width:${pct}%;background:${COLORS.dhw}"></span><span style="width:${100 - pct}%;background:${COLORS.heat}"></span></div>
+        <div class="muted small">Tapwater ${minutesText(dhw)} (${fmt(pct, 0)}%) · Verwarming ${minutesText(heat)} (${fmt(100 - pct, 0)}%)</div>`;
+    };
+    const dhwBlock = ent.boiler_dhw
+      ? `<h3 class="sub">Tapwater vs. verwarming</h3>
+        <div class="tiles">
+          <div class="tile"><div class="muted small">Vandaag</div>${split(t.dhw_minutes, t.heat_minutes)}</div>
+          <div class="tile"><div class="muted small">Periode (${this._days} d)</div>${split(periodDhw, periodHeat)}</div>
+        </div>`
+      : "";
+    const hasTraceData = ent.boiler_flow_temp || ent.boiler_flow_setpoint || ent.boiler_modulation;
+    const hasValves = this._state.rooms.some((r) => r.valves && r.valves.length);
+    return `
+      <div class="card boiler">
+        <div class="card-head"><h3>Ketel &amp; efficiëntie</h3>
+          ${b.cycling ? '<span class="chip" style="--chip:#e53935">Pendelen</span>' : ""}</div>
+        ${status.length ? `<div class="bstatus">${status.join("")}</div>` : ""}
+        <div class="tiles">${kpis}</div>
+        <p class="muted small">${b.tracking_flame ? "Starts en branduren worden geteld vanuit de vlamstatus" : "Geen vlamstatus ingesteld: starts en branduren alleen uit de ketelsensoren"}${ent.boiler_starts_today || ent.boiler_hours_today || ent.boiler_avg_runtime ? "; de tellers van de ketel zelf gaan voor" : ""}.
+          Bij gemiddeld minder dan 10 minuten per start (en minimaal 3 starts) wordt pendelen gemeld – vaak is de aanvoertemperatuur dan te hoog of het minimale vermogen te groot voor de warmtevraag.</p>
+        ${dhwBlock}
+        ${hasTraceData ? `<h3 class="sub">Aanvoer vs. gevraagd &amp; modulatie – laatste 24 uur</h3>
+        <div class="legend">
+          ${ent.boiler_flow_temp ? `<span><i class="line" style="background:${COLORS.flow}"></i>Aanvoer (°C)</span>` : ""}
+          ${ent.boiler_flow_setpoint ? `<span><i class="line" style="background:${COLORS.setpoint}"></i>Gevraagd (°C)</span>` : ""}
+          ${ent.boiler_modulation ? `<span><i class="line" style="background:${COLORS.modulation}"></i>Modulatie (%)</span>` : ""}
+          ${hasValves ? `<span><i class="line" style="background:${COLORS.valve}"></i>Hoogste klepstand (%)</span>` : ""}
+          ${ent.boiler_flame ? '<span><i class="shade-key"></i>Brander aan</span>' : ""}
+        </div>
+        <div class="chart" id="chart-boiler"></div>` : ""}
+        ${rows.length ? `<h3 class="sub">Branderstarts &amp; branduren per dag</h3><div class="chart" id="chart-boiler-days"></div>` : ""}
+      </div>`;
   }
 
   _renderRanking() {
@@ -543,7 +698,7 @@ class HaClimatePanel extends HTMLElement {
     return `<div class="table-wrap"><table class="ranking">
       <thead><tr><th>#</th><th>Kamer</th><th>Warmteverlies</th><th>Stookpercentage</th><th>Energiescore</th></tr></thead>
       <tbody>${rows}</tbody></table></div>
-      <p class="muted small">Warmteverlies = geleerde afkoelcoëfficiënt (°C/uur per °C verschil met buiten). Stookpercentage = deel van de tijd dat de vloerverwarming actief verwarmde in de afgelopen ${ranking[0].days} dagen. De energiescore combineert beide, relatief tot de slechtste kamer.</p>`;
+      <p class="muted small">Warmteverlies = geleerde afkoelcoëfficiënt (°C/uur per °C verschil met buiten). Stookpercentage = deel van de tijd dat de vloerverwarming actief verwarmde in de afgelopen ${ranking[0].days} dagen${this._state.rooms.some((r) => r.valves && r.valves.length) ? " (bij kamers met klepstand-sensoren: de gemiddelde klepopening)" : ""}. De energiescore combineert beide, relatief tot de slechtste kamer.</p>`;
   }
 
   _renderModelSection() {
@@ -682,9 +837,58 @@ class HaClimatePanel extends HTMLElement {
         ],
       });
     }
+    this._renderBoilerCharts();
     const roomsEl = root.getElementById("chart-rooms");
     if (roomsEl) roomsEl.innerHTML = roomChart(this._state.rooms, roomsEl.clientWidth || 700);
     this._bindCharts();
+  }
+
+  _renderBoilerCharts() {
+    const root = this.shadowRoot;
+    const el = root.getElementById("chart-boiler");
+    if (el) {
+      const points = this._boilerTrace;
+      if (!points) el.innerHTML = '<div class="spinner"></div>';
+      else if (!points.length) el.innerHTML = '<p class="muted">Nog geen historie van de ketelsensoren in de recorder.</p>';
+      else {
+        const ent = this._state.boiler.entities || {};
+        const series = [];
+        const col = (key) => points.map((p) => (p[key] === undefined ? null : p[key]));
+        if (ent.boiler_flow_temp) series.push({ name: "Aanvoer", type: "line", axis: "left", color: COLORS.flow, values: col("flow"), unit: "°C", digits: 1 });
+        if (ent.boiler_flow_setpoint) series.push({ name: "Gevraagd", type: "line", axis: "left", color: COLORS.setpoint, values: col("setpoint"), unit: "°C", digits: 1, dashed: true });
+        if (ent.boiler_modulation) series.push({ name: "Modulatie", type: "line", axis: "right", color: COLORS.modulation, values: col("modulation"), unit: "%", digits: 0 });
+        if (points.some((p) => p.valve_max !== undefined && p.valve_max !== null)) {
+          series.push({ name: "Hoogste klepstand", type: "line", axis: "right", color: COLORS.valve, values: col("valve_max"), unit: "%", digits: 0, dashed: true });
+        }
+        el.innerHTML = chart({
+          width: el.clientWidth || 700,
+          labels: points.map((p) => timeOf(p.ts)),
+          series,
+          shade: points.map((p) => p.flame === 1),
+          shadeLabel: "brander aan",
+          // Mark the start of every hot water period.
+          marks: points.map((p, i) => (p.dhw === 1 && (i === 0 || points[i - 1].dhw !== 1) ? "💧" : "")),
+          labelWidth: 48,
+        });
+      }
+    }
+    const daysEl = root.getElementById("chart-boiler-days");
+    if (daysEl) {
+      const rows = (this._history || []).filter((r) => r.boiler);
+      daysEl.innerHTML = chart({
+        width: daysEl.clientWidth || 700,
+        labels: rows.map((r) => dayLabel(r.date) + (r.partial ? " (nu)" : "")),
+        marks: rows.map((r) => (r.boiler.starts >= 3 && r.boiler.avg_run_minutes !== null && r.boiler.avg_run_minutes < 10 ? "⚠" : "")),
+        series: [
+          { name: "Starts", type: "bar", axis: "left", color: COLORS.heat, values: rows.map((r) => r.boiler.starts), unit: "", digits: 0 },
+          { name: "Branduren", type: "line", axis: "right", color: COLORS.modulation, values: rows.map((r) => r.boiler.burn_hours), unit: "uur", digits: 1 },
+          { name: "Gem. looptijd", type: "tooltip", axis: "left", color: "#78909c", values: rows.map((r) => r.boiler.avg_run_minutes), unit: "min", digits: 0 },
+          { name: "Tapwater", type: "tooltip", axis: "left", color: COLORS.dhw, values: rows.map((r) => r.boiler.dhw_minutes), unit: "min", digits: 0 },
+          { name: "Gem. aanvoer", type: "tooltip", axis: "left", color: COLORS.flow, values: rows.map((r) => r.boiler.flow_avg), unit: "°C", digits: 1 },
+          { name: "Graaddagen", type: "tooltip", axis: "left", color: COLORS.degreeDays, values: rows.map((r) => r.degree_days), unit: "gd", digits: 1 },
+        ],
+      });
+    }
   }
 
   /* ----- Schedules ----- */
@@ -811,8 +1015,26 @@ class HaClimatePanel extends HTMLElement {
           <label class="field"><span>Losse temperatuursensor</span><select name="fireplace_temp_sensor" ${dis}>${this._options(temps, st.fireplace_temp_sensor, true)}</select></label>
           <label class="field"><span>Drempelwaarde (°C)</span><input name="fireplace_threshold" type="number" step="0.1" min="0.1" max="5" value="${st.fireplace_threshold}" ${dis}></label>
         </div>
+        ${this._renderBoilerSettings(st, dis)}
         ${this._admin ? '<div class="actions"><button class="btn" type="submit">Instellingen opslaan</button></div>' : '<p class="muted">Alleen beheerders kunnen instellingen wijzigen.</p>'}
       </form>`;
+  }
+
+  _renderBoilerSettings(st, dis) {
+    const binaries = this._entities((s) => s.entity_id.startsWith("binary_sensor."));
+    const sensors = this._entities((s) => s.entity_id.startsWith("sensor."));
+    const configured = BOILER_FIELDS.some((f) => st[f.key]);
+    const field = (f) => `<label class="field"><span>${f.label}</span>
+      <select name="${f.key}" ${dis}>${this._options(f.domain === "binary_sensor" ? binaries : sensors, st[f.key], true)}</select>
+      <small class="muted">${esc(f.hint)}</small></label>`;
+    return `<details class="optional" ${configured ? "open" : ""}>
+      <summary><h3>Ketel / OpenTherm (optioneel)</h3></summary>
+      <p class="muted small">Koppel de entiteiten van je ketel (bijv. OpenTherm Gateway, ems-esp of een andere ketelintegratie) voor branderstarts, pendeldetectie,
+        tapwater vs. verwarming en een grafiek van de aanvoertemperatuur op het tabblad Analyses. Zonder ketel-entiteiten verandert er niets.</p>
+      <div class="form-grid">${BOILER_FIELDS.slice(0, 8).map(field).join("")}</div>
+      <p class="muted small">Optioneel: tellers van de ketel zelf. Laat leeg om starts en branduren te berekenen vanuit de vlamstatus.</p>
+      <div class="form-grid">${BOILER_FIELDS.slice(8).map(field).join("")}</div>
+    </details>`;
   }
 
   /* ---------- Events ---------- */
@@ -858,7 +1080,7 @@ class HaClimatePanel extends HTMLElement {
     const filter = root.getElementById("climate-filter");
     filter?.addEventListener("input", () => {
       const q = filter.value.toLowerCase();
-      root.querySelectorAll("#climate-list .check, #airco-list .check").forEach((el) => {
+      root.querySelectorAll("#climate-list .check, #airco-list .check, #valve-list .check").forEach((el) => {
         el.style.display = el.dataset.name.includes(q) ? "" : "none";
       });
     });
@@ -1045,14 +1267,30 @@ class HaClimatePanel extends HTMLElement {
       "gas_werkelijk_m3", "gas_verwacht_m3", "besparing_m3", "besparing_eur", "variabele_kosten_eur",
       "vaste_kosten_eur", "totale_kosten_eur", "openhaard_minuten", "nachtverlaging", "gedeeltelijke_dag", "gebeurtenissen",
     ];
+    const boiler = result.days.some((r) => r.boiler);
+    if (boiler) {
+      header.push(
+        "ketel_starts", "ketel_branduren", "ketel_gem_looptijd_min", "ketel_korte_runs",
+        "ketel_tapwater_min", "ketel_verwarming_min", "ketel_tapwater_pct", "ketel_aanvoer_gem_c", "ketel_modulatie_gem_pct"
+      );
+    }
     const lines = [header.join(",")];
     for (const r of result.days) {
+      const k = r.boiler || {};
+      const extra = boiler
+        ? [
+            k.starts ?? "", num(k.burn_hours, 2), num(k.avg_run_minutes, 1), k.short_runs ?? "",
+            num(k.dhw_minutes, 0), num(k.heat_minutes, 0), num(k.dhw_share === null || k.dhw_share === undefined ? null : k.dhw_share * 100, 1),
+            num(k.flow_avg, 1), num(k.modulation_avg, 1),
+          ]
+        : [];
       lines.push([
         r.date, num(r.mean_temperature, 2), num(r.indoor_temperature, 2), num(r.indoor_target, 2), num(r.heating_limit, 2),
         num(r.degree_days, 2), num(r.gas, 3), num(r.expected, 3), num(r.saved, 3), num(r.saved_eur, 2),
         num(r.cost_variable, 2), num(r.cost_fixed, 2), num(r.cost, 2), r.fireplace_minutes ?? 0,
         r.setback ? "ja" : "nee", r.partial ? "ja" : "nee",
         (r.events || []).map((e) => `${timeOf(e.time)} ${e.text}`).join(" | "),
+        ...extra,
       ].map(cell).join(","));
     }
     const blob = new Blob(["\ufeff" + lines.join("\r\n") + "\r\n"], { type: "text/csv;charset=utf-8" });
@@ -1076,7 +1314,8 @@ class HaClimatePanel extends HTMLElement {
       this._toast("Een entiteit kan niet tegelijk lus en airco zijn", true);
       return;
     }
-    const room = { name, climates, aircos };
+    const valves = [...root.querySelectorAll('#valve-list input[name="valve"]:checked')].map((i) => i.value);
+    const room = { name, climates, aircos, valves };
     if (this._dialog.room?.id) room.id = this._dialog.room.id;
     const result = await this._call({ type: "ha_climate/room/save", room }, room.id ? "Kamer opgeslagen" : "Kamer toegevoegd");
     if (result) {
@@ -1130,6 +1369,7 @@ class HaClimatePanel extends HTMLElement {
       fireplace_temp_sensor: get("fireplace_temp_sensor") || null,
       fireplace_threshold: numOrNull(get("fireplace_threshold")),
     };
+    for (const f of BOILER_FIELDS) settings[f.key] = get(f.key) || null;
     for (const key of ["heating_limit", "baseline_days", "night_offset", "fireplace_threshold"]) {
       if (settings[key] === null) delete settings[key];
     }
@@ -1157,7 +1397,7 @@ function niceMax(value) {
   return nice * exp;
 }
 
-function chart({ width, labels, series, marks = [], shade = [], events = [] }) {
+function chart({ width, labels, series, marks = [], shade = [], events = [], shadeLabel = "nachtverlaging", labelWidth = 64 }) {
   const height = 260;
   const pad = { top: events.some((e) => e && e.length) ? 22 : 16, right: series.some((s) => s.axis === "right") ? 44 : 14, bottom: 34, left: 48 };
   const w = Math.max(280, width);
@@ -1206,7 +1446,7 @@ function chart({ width, labels, series, marks = [], shade = [], events = [] }) {
   }
   // x labels: evenly spaced, the last one always shown (right aligned) and
   // any label that would collide with it is dropped.
-  const labelW = 64;
+  const labelW = labelWidth;
   const every = Math.max(1, Math.ceil(labelW / step));
   const lastX = x(n - 1);
   const lastWidth = Math.max(labelW, String(labels[n - 1] || "").length * 6.5);
@@ -1272,7 +1512,7 @@ function chart({ width, labels, series, marks = [], shade = [], events = [] }) {
     const evs = (events[i] || [])
       .map((e) => `<div class="tip-event">⚑ ${timeOf(e.time)} ${esc(e.text)}</div>`)
       .join("");
-    const tip = `<div class="tip-title">${esc(label)}${marks[i] ? " " + marks[i] : ""}${shade[i] ? " · nachtverlaging" : ""}</div>${lines}${evs}`;
+    const tip = `<div class="tip-title">${esc(label)}${marks[i] ? " " + marks[i] : ""}${shade[i] ? ` · ${shadeLabel}` : ""}</div>${lines}${evs}`;
     svg += `<rect x="${pad.left + step * i}" y="${pad.top}" width="${step}" height="${innerH}" fill="transparent" data-tip="${esc(tip)}"/>`;
   });
   svg += "</svg>";
@@ -1513,6 +1753,17 @@ const STYLE = `
   .busy.show { display: block; }
   .busy .spinner { width: 30%; height: 3px; border: 0; border-radius: 0; background: var(--accent); animation: slide 1s infinite linear; margin: 0; }
   .spinner { width: 28px; height: 28px; border: 3px solid var(--border); border-top-color: var(--accent); border-radius: 50%; animation: spin 1s linear infinite; margin: 16px auto; }
+  details.optional { border-top: 1px solid var(--border); margin-top: 20px; padding-top: 4px; font-size: 14px; }
+  details.optional summary { list-style: revert; color: var(--primary-text-color); }
+  details.optional summary h3 { display: inline-block; margin: 12px 0 8px 4px; }
+  details.optional .field small { font-size: 11px; }
+  .bstatus { display: flex; flex-wrap: wrap; gap: 10px 24px; padding: 12px; margin-bottom: 12px; border-radius: 8px;
+    background: var(--secondary-background-color, rgba(0,0,0,.04)); }
+  .bstat { display: flex; flex-direction: column; gap: 4px; align-items: flex-start; min-width: 110px; }
+  .tile.warn { box-shadow: inset 3px 0 0 #e53935; }
+  .split { display: flex; height: 10px; border-radius: 5px; overflow: hidden; background: var(--border); margin: 6px 0 2px; }
+  .split span { display: block; height: 100%; }
+  .legend .shade-key { width: 12px; height: 10px; background: #5c6bc0; opacity: .25; border-radius: 2px; }
   @keyframes spin { to { transform: rotate(360deg); } }
   @keyframes slide { from { transform: translateX(-100%); } to { transform: translateX(400%); } }
   @media (max-width: 600px) {
