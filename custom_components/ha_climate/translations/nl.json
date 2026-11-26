@@ -1,0 +1,227 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "HA Climate instellen",
+        "description": "Kies de buitentemperatuur- en gasmeter-sensor. Beide moeten langetermijnstatistieken hebben (state_class). Een prijs-entiteit gaat voor op de vaste gasprijs.",
+        "data": {
+          "outdoor_sensor": "Buitentemperatuur-sensor",
+          "gas_sensor": "Gasverbruik-sensor (m³)",
+          "gas_price": "Gasprijs (vast)",
+          "gas_price_entity": "Gasprijs-entiteit (optioneel)",
+          "heating_limit": "Stookgrens",
+          "baseline_days": "Historie voor baseline (dagen)"
+        },
+        "data_description": {
+          "heating_limit": "Graaddagen = max(0, stookgrens − gemiddelde buitentemperatuur). Standaard 18 °C."
+        }
+      },
+      "night": {
+        "title": "Nachtverlaging (algemeen)",
+        "description": "Standaardinstellingen voor alle ruimtes. Per ruimte kun je afwijkende tijden instellen.",
+        "data": {
+          "night_start": "Starttijd verlaging",
+          "night_end": "Eindtijd / ochtendherstel",
+          "night_offset": "Temperatuurverlaging"
+        },
+        "data_description": {
+          "night_offset": "Negatief getal, bijv. −2,0 °C."
+        }
+      }
+    },
+    "error": {
+      "same_entity": "Buitentemperatuur en gasverbruik moeten verschillende entiteiten zijn.",
+      "name_required": "Geef de ruimte een naam.",
+      "name_exists": "Er bestaat al een ruimte met deze naam.",
+      "climates_required": "Kies minimaal één vloerverwarmingslus.",
+      "climate_in_use": "Een van deze lussen is al aan een andere ruimte gekoppeld."
+    },
+    "abort": {
+      "already_configured": "Deze gassensor is al geconfigureerd."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "HA Climate instellingen",
+        "description": "Wat wil je aanpassen? Wijzigingen worden direct opgeslagen.",
+        "menu_options": {
+          "general": "Sensoren, gasprijs & stookgrens",
+          "night": "Nachtverlaging (algemeen)",
+          "add_room": "Ruimte toevoegen",
+          "edit_room": "Ruimte bewerken",
+          "remove_room": "Ruimte verwijderen",
+          "fireplace": "Openhaard"
+        }
+      },
+      "general": {
+        "title": "Sensoren & graaddagen",
+        "description": "Kies de buitentemperatuur- en gasmeter-sensor. Beide moeten langetermijnstatistieken hebben (state_class). Een prijs-entiteit gaat voor op de vaste gasprijs.",
+        "data": {
+          "outdoor_sensor": "Buitentemperatuur-sensor",
+          "gas_sensor": "Gasverbruik-sensor (m³)",
+          "gas_price": "Gasprijs (vast)",
+          "gas_price_entity": "Gasprijs-entiteit (optioneel)",
+          "heating_limit": "Stookgrens",
+          "baseline_days": "Historie voor baseline (dagen)"
+        },
+        "data_description": {
+          "heating_limit": "Graaddagen = max(0, stookgrens − gemiddelde buitentemperatuur). Standaard 18 °C."
+        }
+      },
+      "night": {
+        "title": "Nachtverlaging (algemeen)",
+        "description": "Standaardinstellingen voor alle ruimtes. Per ruimte kun je afwijkende tijden instellen.",
+        "data": {
+          "night_start": "Starttijd verlaging",
+          "night_end": "Eindtijd / ochtendherstel",
+          "night_offset": "Temperatuurverlaging"
+        },
+        "data_description": {
+          "night_offset": "Negatief getal, bijv. −2,0 °C."
+        }
+      },
+      "add_room": {
+        "title": "Ruimte toevoegen",
+        "description": "Een ruimte bevat één of meer vloerverwarmingslussen (climate-entiteiten).",
+        "data": {
+          "name": "Naam van de ruimte",
+          "climates": "Vloerverwarmingslussen",
+          "use_global_night": "Algemene nachtverlaging gebruiken",
+          "night_start": "Starttijd verlaging",
+          "night_end": "Eindtijd / ochtendherstel",
+          "night_offset": "Temperatuurverlaging"
+        },
+        "data_description": {
+          "use_global_night": "Uitzetten om hieronder eigen tijden en verlaging voor deze ruimte te gebruiken."
+        }
+      },
+      "room": {
+        "title": "Ruimte {room} bewerken",
+        "description": "Een ruimte bevat één of meer vloerverwarmingslussen (climate-entiteiten).",
+        "data": {
+          "name": "Naam van de ruimte",
+          "climates": "Vloerverwarmingslussen",
+          "use_global_night": "Algemene nachtverlaging gebruiken",
+          "night_start": "Starttijd verlaging",
+          "night_end": "Eindtijd / ochtendherstel",
+          "night_offset": "Temperatuurverlaging"
+        },
+        "data_description": {
+          "use_global_night": "Uitzetten om hieronder eigen tijden en verlaging voor deze ruimte te gebruiken."
+        }
+      },
+      "edit_room": {
+        "title": "Ruimte bewerken",
+        "data": {
+          "room": "Ruimte"
+        }
+      },
+      "remove_room": {
+        "title": "Ruimte verwijderen",
+        "description": "Verlaagde lussen in deze ruimte worden automatisch hersteld.",
+        "data": {
+          "room": "Ruimte"
+        }
+      },
+      "fireplace": {
+        "title": "Openhaard",
+        "description": "Kies de thermostaat van de ruimte met de openhaard. Laat leeg om openhaard-detectie uit te schakelen.",
+        "data": {
+          "fireplace_climate": "Thermostaat openhaard-ruimte",
+          "fireplace_temp_sensor": "Losse temperatuursensor (optioneel)",
+          "fireplace_threshold": "Drempelwaarde"
+        },
+        "data_description": {
+          "fireplace_temp_sensor": "Gebruik deze sensor i.p.v. de gemeten temperatuur van de thermostaat.",
+          "fireplace_threshold": "Openhaard actief als de temperatuur zoveel boven de doeltemperatuur komt of zoveel stijgt (binnen een uur) terwijl de vloerverwarming niet verwarmt."
+        }
+      }
+    },
+    "error": {
+      "same_entity": "Buitentemperatuur en gasverbruik moeten verschillende entiteiten zijn.",
+      "name_required": "Geef de ruimte een naam.",
+      "name_exists": "Er bestaat al een ruimte met deze naam.",
+      "climates_required": "Kies minimaal één vloerverwarmingslus.",
+      "climate_in_use": "Een van deze lussen is al aan een andere ruimte gekoppeld."
+    }
+  },
+  "entity": {
+    "binary_sensor": {
+      "fireplace_active": {
+        "name": "Openhaard actief"
+      }
+    },
+    "button": {
+      "recalculate_baseline": {
+        "name": "Baseline herberekenen"
+      }
+    },
+    "switch": {
+      "night_setback": {
+        "name": "Nachtverlaging"
+      },
+      "room_night_setback": {
+        "name": "Nachtverlaging {room}"
+      }
+    },
+    "sensor": {
+      "degree_days_today": {
+        "name": "Graaddagen vandaag"
+      },
+      "degree_days_yesterday": {
+        "name": "Graaddagen gisteren"
+      },
+      "baseline": {
+        "name": "Baseline gas per graaddag"
+      },
+      "expected_gas_today": {
+        "name": "Verwacht gasverbruik vandaag"
+      },
+      "expected_gas_yesterday": {
+        "name": "Verwacht gasverbruik gisteren"
+      },
+      "actual_gas_today": {
+        "name": "Werkelijk gasverbruik vandaag"
+      },
+      "actual_gas_yesterday": {
+        "name": "Werkelijk gasverbruik gisteren"
+      },
+      "saved_gas_today": {
+        "name": "Bespaard gas vandaag"
+      },
+      "saved_gas_yesterday": {
+        "name": "Bespaard gas gisteren"
+      },
+      "saved_gas_total": {
+        "name": "Bespaard gas totaal"
+      },
+      "saved_money_today": {
+        "name": "Besparing vandaag"
+      },
+      "saved_money_yesterday": {
+        "name": "Besparing gisteren"
+      },
+      "saved_money_total": {
+        "name": "Besparing totaal"
+      }
+    }
+  },
+  "services": {
+    "recalculate_baseline": {
+      "name": "Baseline herberekenen",
+      "description": "Leest de langetermijnstatistieken opnieuw uit en berekent de gas-baseline (m³ per graaddag).",
+      "fields": {
+        "config_entry_id": {
+          "name": "Configuratie",
+          "description": "Optioneel: alleen deze HA Climate-configuratie herberekenen."
+        }
+      }
+    }
+  },
+  "exceptions": {
+    "no_entry": {
+      "message": "Geen geladen HA Climate-configuratie gevonden."
+    }
+  }
+}

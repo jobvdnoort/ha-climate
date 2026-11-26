@@ -1,0 +1,13 @@
+{
+  "domain": "ha_climate",
+  "name": "HA Climate",
+  "codeowners": ["@jobvdnoort"],
+  "config_flow": true,
+  "dependencies": ["recorder"],
+  "documentation": "https://github.com/jobvdnoort/ha-climate",
+  "integration_type": "service",
+  "iot_class": "calculated",
+  "issue_tracker": "https://github.com/jobvdnoort/ha-climate/issues",
+  "requirements": [],
+  "version": "1.0.0"
+}

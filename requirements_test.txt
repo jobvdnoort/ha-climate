@@ -1,0 +1,3 @@
+pytest
+# Only needed for the integration tests in tests_integration/
+pytest-homeassistant-custom-component
