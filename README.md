@@ -46,7 +46,7 @@ Bij het toevoegen kies je:
 | Gasprijs | Vast bedrag in €/m³ en/of een entiteit (sensor/input_number); de entiteit gaat voor |
 | Vaste leveringskosten | Optioneel (vastrecht/netbeheer), standaard 0,00, **per maand** (standaard) of per dag. Een maandbedrag wordt omgerekend naar dagkosten (`maandbedrag / 30,4375`). Telt mee in de totale gaskosten, niet in de besparing |
 | Startdatum besparing | Optioneel: vanaf deze dag wordt de besparing (cumulatief vanaf 0) gemeten |
-| Graaddagen corrigeren voor binnentemperatuur | Optioneel: stookgrens + (gemiddelde ingestelde binnentemperatuur − 20 °C) per dag |
+| Graaddagen corrigeren voor comforttemperatuur | Optioneel: stookgrens + (gemiddelde comforttemperatuur zonder nachtverlaging − referentie) per dag. De referentie (standaard 20,0 °C) is de temperatuur waarop het huis in de baselineperiode werd verwarmd |
 | Stookgrens | Standaard 18,0 °C |
 | Baseline-periode | Aantal dagen voor de baseline; 0 (standaard) = alles vanaf de eerste dag dat beide sensoren data hebben |
 | Nachtverlaging | Start 22:00, einde 06:30, verlaging −2,0 °C |
@@ -139,7 +139,7 @@ Meetmomenten met gaten, onbekende `hvac_action` of een brandende openhaard worde
 
 **Baseline bevriezen.** Bevries de baseline (bijv. vlak voordat je nachtverlaging aanzet) en kies een startdatum voor de besparingsmeting. Vanaf die dag start de cumulatieve besparing op 0 en wordt het verbruik vergeleken met de bevroren waarde, ook als de historie later verandert.
 
-**Binnentemperatuur.** Elke minuut wordt de gemiddelde gemeten en ingestelde binnentemperatuur over de kamers bijgehouden en per dag permanent opgeslagen. Met de optionele correctie wordt de stookgrens per dag verschoven met het verschil tussen de gemiddelde doeltemperatuur en 20 °C (de vaste 18 °C-stookgrens gaat uit van ~20 °C binnen).
+**Binnentemperatuur.** Elke minuut wordt de gemiddelde gemeten en ingestelde binnentemperatuur over de kamers bijgehouden en per dag permanent opgeslagen. Daarnaast wordt de **comforttemperatuur** bijgehouden: de dagtemperatuur van elke kamer, ook tijdens de nachtverlaging (dan de oorspronkelijke temperatuur van vóór de verlaging). Met de optionele correctie wordt de stookgrens per dag verschoven met het verschil tussen de gemiddelde comforttemperatuur en de **referentie-comforttemperatuur** (de vaste 18 °C-stookgrens gaat uit van ~20 °C binnen). Zet je de kamers warmer dan in de baselineperiode, dan stijgt het verwachte verbruik mee; de nachtverlaging telt niet mee in de correctie en blijft dus als besparing zichtbaar. Dagen zonder bekende comforttemperatuur (bijv. vóór installatie, dus vaak de baselineperiode) tellen als de referentie, zodat baseline en metingen dezelfde regel gebruiken. Vul daarom als referentie de temperatuur in die je in de baselineperiode aanhield.
 
 **Onzuinigste ruimte.** Per kamer worden het genormaliseerde warmteverlies (de geleerde afkoelcoëfficiënt k, °C/uur per °C ΔT) en het stookpercentage van de afgelopen 7 dagen (gemiddelde inschakelduur van de meetblokken) gecombineerd tot een energiescore, relatief tot de slechtste kamer. Labels: *Hoog warmteverlies* (k ≥ 0,06), *Stookt veel* (≥ 50 % van de tijd), *Gemiddeld* (k ≥ 0,035 of ≥ 25 %) of *Zuinig*.
 

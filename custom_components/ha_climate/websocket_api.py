@@ -30,6 +30,7 @@ from .const import (
     CONF_GAS_PRICE,
     CONF_GAS_FIXED_COSTS,
     CONF_DD_INDOOR_CORRECTION,
+    CONF_DD_REFERENCE_TEMP,
     CONF_GAS_FIXED_COSTS_UNIT,
     CONF_GAS_PRICE_ENTITY,
     CONF_GAS_SENSOR,
@@ -49,6 +50,7 @@ from .const import (
     CONF_ROOMS,
     CONF_SAVINGS_START,
     DEFAULT_BASELINE_DAYS,
+    DEFAULT_DD_REFERENCE_TEMP,
     DEFAULT_COMFORT_TIME,
     DEFAULT_FIXED_COSTS_UNIT,
     DEFAULT_FIREPLACE_THRESHOLD,
@@ -76,6 +78,7 @@ SETTING_KEYS = (
     CONF_BASELINE_DAYS,
     CONF_SAVINGS_START,
     CONF_DD_INDOOR_CORRECTION,
+    CONF_DD_REFERENCE_TEMP,
     CONF_NIGHT_START,
     CONF_NIGHT_END,
     CONF_NIGHT_OFFSET,
@@ -155,6 +158,9 @@ SETTINGS_SCHEMA = vol.Schema(
         vol.Optional(CONF_GAS_FIXED_COSTS_UNIT): vol.In(["month", "day"]),
         vol.Optional(CONF_SAVINGS_START): vol.Any(None, "", _date),
         vol.Optional(CONF_DD_INDOOR_CORRECTION): bool,
+        vol.Optional(CONF_DD_REFERENCE_TEMP): vol.All(
+            vol.Coerce(float), vol.Range(min=15, max=25)
+        ),
         vol.Optional(CONF_NIGHT_START): _time,
         vol.Optional(CONF_NIGHT_END): _time,
         vol.Optional(CONF_NIGHT_OFFSET): vol.All(vol.Coerce(float), vol.Range(min=-10, max=0)),
@@ -323,6 +329,7 @@ async def ws_state(hass, connection, msg, entry: HaClimateConfigEntry) -> None:
         (CONF_GAS_FIXED_COSTS, 0.0),
         (CONF_GAS_FIXED_COSTS_UNIT, DEFAULT_FIXED_COSTS_UNIT),
         (CONF_DD_INDOOR_CORRECTION, False),
+        (CONF_DD_REFERENCE_TEMP, DEFAULT_DD_REFERENCE_TEMP),
     ):
         if settings.get(key) is None:
             settings[key] = default

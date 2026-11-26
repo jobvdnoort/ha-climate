@@ -172,7 +172,8 @@ async def test_room_valves_save_and_model(hass, ha_climate_enabled, hass_ws_clie
     msg = await client.receive_json()
     assert not msg["success"]
 
-    start = dt_util.utcnow().replace(minute=0, second=0, microsecond=0)
+    # In the past, so the real minute tick cannot mix into the simulated window.
+    start = dt_util.utcnow().replace(minute=0, second=0, microsecond=0) - timedelta(days=2)
     start -= timedelta(hours=start.hour % 2)
     for minute in range(122):
         coordinator._learn(start + timedelta(minutes=minute))  # noqa: SLF001

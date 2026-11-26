@@ -13,13 +13,14 @@
           "baseline_days": "History used for baseline (days, 0 = all)",
           "gas_fixed_costs": "Fixed delivery costs",
           "gas_fixed_costs_unit": "Fixed costs unit",
-          "degree_day_indoor_correction": "Correct degree days for indoor temperature"
+          "degree_day_indoor_correction": "Correct degree days for comfort temperature",
+          "degree_day_reference_temp": "Reference comfort temperature (°C)"
         },
         "data_description": {
           "heating_limit": "Degree days = max(0, heating limit − mean outdoor temperature). Default 18 °C.",
           "baseline_days": "0 = all days since both sensors have data.",
           "gas_fixed_costs": "Optional (standing charge, grid costs). A monthly amount is converted to daily costs (÷ 30.4375) and added to the total gas costs, not to the savings.",
-          "degree_day_indoor_correction": "Shifts the heating limit by the difference between the mean indoor target temperature and 20 °C."
+          "degree_day_indoor_correction": "Shifts the heating limit by the difference between the mean comfort (day) temperature of the rooms – without the night setback – and the reference: the temperature the house was heated to in the baseline period. Days without known temperature count as the reference."
         }
       },
       "night": {
@@ -74,13 +75,14 @@
           "baseline_days": "History used for baseline (days, 0 = all)",
           "gas_fixed_costs": "Fixed delivery costs",
           "gas_fixed_costs_unit": "Fixed costs unit",
-          "degree_day_indoor_correction": "Correct degree days for indoor temperature"
+          "degree_day_indoor_correction": "Correct degree days for comfort temperature",
+          "degree_day_reference_temp": "Reference comfort temperature (°C)"
         },
         "data_description": {
           "heating_limit": "Degree days = max(0, heating limit − mean outdoor temperature). Default 18 °C.",
           "baseline_days": "0 = all days since both sensors have data.",
           "gas_fixed_costs": "Optional (standing charge, grid costs). A monthly amount is converted to daily costs (÷ 30.4375) and added to the total gas costs, not to the savings.",
-          "degree_day_indoor_correction": "Shifts the heating limit by the difference between the mean indoor target temperature and 20 °C."
+          "degree_day_indoor_correction": "Shifts the heating limit by the difference between the mean comfort (day) temperature of the rooms – without the night setback – and the reference: the temperature the house was heated to in the baseline period. Days without known temperature count as the reference."
         }
       },
       "night": {

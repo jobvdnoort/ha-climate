@@ -17,6 +17,8 @@ CONF_GAS_FIXED_COSTS: Final = "gas_fixed_costs"
 CONF_GAS_FIXED_COSTS_UNIT: Final = "gas_fixed_costs_unit"  # "month" or "day"
 CONF_SAVINGS_START: Final = "savings_start"
 CONF_DD_INDOOR_CORRECTION: Final = "degree_day_indoor_correction"
+# Comfort temperature the baseline period was heated to (reference of the correction).
+CONF_DD_REFERENCE_TEMP: Final = "degree_day_reference_temp"
 CONF_HEATING_LIMIT: Final = "heating_limit"
 CONF_BASELINE_DAYS: Final = "baseline_days"
 
@@ -71,6 +73,7 @@ BOILER_BINARY_KEYS: Final = (CONF_BOILER_FLAME, CONF_BOILER_HEAT_REQUEST, CONF_B
 
 # --- Defaults ---------------------------------------------------------------
 DEFAULT_HEATING_LIMIT: Final = 18.0
+DEFAULT_DD_REFERENCE_TEMP: Final = 20.0
 # 0 = use all history since both sensors have data.
 DEFAULT_BASELINE_DAYS: Final = 0
 DEFAULT_NIGHT_START: Final = "22:00:00"

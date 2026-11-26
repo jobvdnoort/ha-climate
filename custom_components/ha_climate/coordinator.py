@@ -103,6 +103,7 @@ from .const import (
     CONF_FIREPLACE_THRESHOLD,
     CONF_GAS_PRICE,
     CONF_DD_INDOOR_CORRECTION,
+    CONF_DD_REFERENCE_TEMP,
     CONF_GAS_FIXED_COSTS,
     CONF_GAS_FIXED_COSTS_UNIT,
     CONF_GAS_PRICE_ENTITY,
@@ -125,6 +126,7 @@ from .const import (
     AIRCO_ACTIVE_ACTIONS,
     AIRCO_DEFAULT_COOL_TEMP,
     DEFAULT_BASELINE_DAYS,
+    DEFAULT_DD_REFERENCE_TEMP,
     DEFAULT_FIXED_COSTS_UNIT,
     DEFAULT_COMFORT_TIME,
     DEFAULT_FIREPLACE_THRESHOLD,
@@ -366,7 +368,8 @@ class HaClimateCoordinator(DataUpdateCoordinator[EnergyData]):
         history.setdefault("days", {})
         history.setdefault("models", {})
         history.setdefault("overlap_start", None)
-        history.setdefault("indoor", {})  # day -> [Σ measured, n, Σ target, n]
+        # day -> [Σ measured, n, Σ target, n, Σ comfort, n]
+        history.setdefault("indoor", {})
         history.setdefault("events", [])  # [{"ts", "type", "room", "text"}]
         history.setdefault("boiler", {})  # {"days": {day: {...}}}
         self.boiler = BoilerTracker.from_dict(
@@ -823,12 +826,15 @@ class HaClimateCoordinator(DataUpdateCoordinator[EnergyData]):
         learned = False
         indoor: list[float] = []
         targets: list[float] = []
+        comforts: list[float] = []
         for room in self.rooms:
             measured = self.room_measurements(room)
             if measured["current_temperature"] is not None:
                 indoor.append(measured["current_temperature"])
             if measured["target_temperature"] is not None:
                 targets.append(measured["target_temperature"])
+            if (comfort := self.comfort_temperature(room, measured)) is not None:
+                comforts.append(comfort)
             valid = not (
                 (self.room_has_fireplace(room) and self.fireplace.active)
                 or measured["airco_active"]
@@ -841,15 +847,21 @@ class HaClimateCoordinator(DataUpdateCoordinator[EnergyData]):
                 now, measured["current_temperature"], outside, heating, valid
             ):
                 learned = True
-        if indoor or targets:
+        if indoor or targets or comforts:
             day = now.date().isoformat()
-            log = self._history["indoor"].setdefault(day, [0.0, 0, 0.0, 0])
+            log = self._history["indoor"].setdefault(day, [0.0, 0, 0.0, 0, 0.0, 0])
+            if len(log) < 6:  # logged by an older version
+                log.extend([0.0, 0])
             if indoor:
                 log[0] = round(log[0] + sum(indoor) / len(indoor), 3)
                 log[1] += 1
             if targets:
                 log[2] = round(log[2] + sum(targets) / len(targets), 3)
                 log[3] += 1
+            if comforts:
+                # Day temperature, without the night setback.
+                log[4] = round(log[4] + sum(comforts) / len(comforts), 3)
+                log[5] += 1
             # Minute counters change constantly; the delayed save batches them.
             learned = learned or now.minute % 15 == 0
         if learned:
@@ -860,7 +872,9 @@ class HaClimateCoordinator(DataUpdateCoordinator[EnergyData]):
         self.model(room_id).reset()
         self._async_save_history()
 
-    def comfort_temperature(self, room: dict[str, Any]) -> float | None:
+    def comfort_temperature(
+        self, room: dict[str, Any], measured: dict[str, Any] | None = None
+    ) -> float | None:
         """Return the temperature the room should have during the day."""
         schedule = self.schedule(room)
         if schedule.day_temp is not None:
@@ -868,7 +882,7 @@ class HaClimateCoordinator(DataUpdateCoordinator[EnergyData]):
         state = self._stored["room_state"].get(room[CONF_ROOM_ID], {})
         if state.get("active") and state.get("entities"):
             return _mean([v["original"] for v in state["entities"].values()])
-        return self.room_measurements(room)["target_temperature"]
+        return (measured or self.room_measurements(room))["target_temperature"]
 
     def preheat_plan(self, room: dict[str, Any]) -> PreheatPlan | None:
         """Return the optimum start plan for a room under current conditions."""
@@ -1377,6 +1391,12 @@ class HaClimateCoordinator(DataUpdateCoordinator[EnergyData]):
         """Whether degree days are corrected for the indoor target temperature."""
         return bool(self.config.get(CONF_DD_INDOOR_CORRECTION, False))
 
+    @property
+    def reference_temperature(self) -> float:
+        """Comfort temperature of the baseline period (reference of the correction)."""
+        value = _float_or_none(self.config.get(CONF_DD_REFERENCE_TEMP))
+        return value if value is not None else DEFAULT_DD_REFERENCE_TEMP
+
     def indoor_day(self, day: date) -> tuple[float | None, float | None]:
         """Mean measured and target indoor temperature of a day."""
         log = self._history["indoor"].get(day.isoformat())
@@ -1386,11 +1406,25 @@ class HaClimateCoordinator(DataUpdateCoordinator[EnergyData]):
         target = log[2] / log[3] if log[3] else None
         return measured, target
 
+    def comfort_day(self, day: date) -> float | None:
+        """Mean comfort (day) temperature of a day, without the night setback."""
+        log = self._history["indoor"].get(day.isoformat())
+        if not log or len(log) < 6 or not log[5]:
+            return None
+        return log[4] / log[5]
+
     def heating_limit_for(self, day: date) -> float:
-        """Heating limit of a day, corrected for the indoor target if enabled."""
+        """Heating limit of a day, corrected for the comfort temperature if enabled.
+
+        Days without a logged comfort temperature (e.g. before installation)
+        count as heated to the reference temperature, i.e. they are not shifted,
+        so the baseline period and later days use the same rule.
+        """
         if not self.indoor_correction:
             return self.heating_limit
-        return corrected_heating_limit(self.heating_limit, self.indoor_day(day)[1])
+        return corrected_heating_limit(
+            self.heating_limit, self.comfort_day(day), self.reference_temperature
+        )
 
     def _limits(self, records: list[DayRecord]) -> dict[date, float] | None:
         if not self.indoor_correction:
@@ -1410,6 +1444,7 @@ class HaClimateCoordinator(DataUpdateCoordinator[EnergyData]):
             "savings_start": self.savings_start.isoformat() if self.savings_start else None,
             "measurement_start": self._measurement_start().isoformat(),
             "indoor_correction": self.indoor_correction,
+            "reference_temperature": self.reference_temperature,
         }
 
     def _fireplace_entity_id(self) -> str | None:
@@ -1515,6 +1550,7 @@ class HaClimateCoordinator(DataUpdateCoordinator[EnergyData]):
                 "mean_temperature": mean,
                 "indoor_temperature": indoor,
                 "indoor_target": target,
+                "indoor_comfort": self.comfort_day(day),
                 "heating_limit": self.heating_limit_for(day),
                 "degree_days": dd,
                 "gas": gas,

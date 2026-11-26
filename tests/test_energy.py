@@ -65,3 +65,10 @@ def test_rank_rooms_heavy_heating_label():
 def test_describe_night():
     assert calc.describe_night("21:30:00", "06:00:00", -1.5) == "-1,5 °C, 21:30–06:00"
     assert calc.describe_night("22:00", "06:30", None, 16.0) == "16,0 °C, 22:00–06:30"
+
+
+def test_corrected_heating_limit_with_reference():
+    # Reference = the comfort temperature of the baseline period.
+    assert calc.corrected_heating_limit(18.0, None, 20.5) == 18.0
+    assert calc.corrected_heating_limit(18.0, 20.5, 20.5) == 18.0
+    assert calc.corrected_heating_limit(18.0, 21.5, 20.5) == pytest.approx(19.0)
