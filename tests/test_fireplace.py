@@ -81,3 +81,30 @@ def test_missing_temperature_is_inactive():
 def test_unknown_hvac_action_counts_as_not_heating():
     det = _detector()
     assert det.update(T0, 21.6, 21.0, None) is True
+
+
+def test_lowering_the_target_is_not_a_fireplace():
+    """A manual (or scheduled) lower setpoint leaves the room above target for a while."""
+    det = _detector()
+    assert det.update(T0, 20.5, 20.5, "idle") is False
+    # Target lowered by 1.5 °C: the room is now 1.5 °C above target.
+    assert det.update(T0 + timedelta(minutes=1), 20.5, 19.0, "idle") is False
+    assert det.update(T0 + timedelta(minutes=60), 20.2, 19.0, "idle") is False
+    # Cooled down to the new target: normal detection again.
+    assert det.update(T0 + timedelta(hours=4), 19.2, 19.0, "idle") is False
+    assert det.update(T0 + timedelta(hours=5), 19.7, 19.0, "idle") is True
+
+
+def test_fire_while_settling_still_detected_by_rise():
+    det = _detector()
+    det.update(T0, 20.5, 20.5, "idle")
+    det.update(T0 + timedelta(minutes=1), 20.5, 19.0, "idle")
+    det.update(T0 + timedelta(minutes=30), 20.3, 19.0, "idle")
+    # The fireplace makes the temperature rise 0.6 °C within the hour.
+    assert det.update(T0 + timedelta(minutes=70), 20.9, 19.0, "idle") is True
+
+
+def test_lower_target_ends_active_fireplace_without_rise():
+    det = _detector()
+    assert det.update(T0, 21.6, 21.0, "idle") is True
+    assert det.update(T0 + timedelta(hours=2), 21.6, 19.5, "idle") is False

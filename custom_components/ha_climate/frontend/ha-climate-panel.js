@@ -958,7 +958,7 @@ class HaClimatePanel extends HTMLElement {
     const a = this._advice;
     if (!a) return `<div class="card empty"><div class="spinner"></div><p>Tips berekenen uit de laatste 10 dagen…</p></div>`;
     const basis = a.basis;
-    const ICON = { measurement: "📏", night: "🌙", day: "🌡", room: "🏠", boiler: "🔥" };
+    const ICON = { measurement: "📏", result: "📊", night: "🌙", day: "🌡", room: "🏠", boiler: "🔥" };
     const CONF = { goed: "#43a047", redelijk: "#ffa726", laag: "#9e9e9e" };
     const tip = (t) => `
       <div class="card tip-card cat-${esc(t.category)}">
@@ -967,6 +967,7 @@ class HaClimatePanel extends HTMLElement {
           <div class="tip-head"><b>${esc(t.title)}</b></div>
           <p>${esc(t.text)}</p>
           ${t.details && t.details.length ? `<ul class="tip-details">${t.details.map((d) => `<li>${esc(d)}</li>`).join("")}</ul>` : ""}
+          ${t.action && this._admin ? `<div class="actions left"><button class="btn" data-action="apply-tip" data-tip="${esc(t.id)}">${esc(t.action.label || "Toepassen")}</button></div>` : ""}
         </div>
         ${t.saving_eur_month !== null && t.saving_eur_month !== undefined ? `<div class="tip-saving">
           <div class="mid">${t.saving_eur_month > 0 ? "≈ " : ""}${euro(t.saving_eur_month)}</div>
@@ -974,9 +975,10 @@ class HaClimatePanel extends HTMLElement {
           <span class="chip" style="--chip:${CONF[t.confidence] || "#9e9e9e"}">zekerheid ${esc(t.confidence)}</span>
         </div>` : ""}
       </div>`;
-    const top = a.tips.filter((t) => t.category === "measurement");
-    const money = a.tips.filter((t) => t.category !== "measurement" && t.saving_eur_month !== null && t.saving_eur_month !== undefined);
-    const other = a.tips.filter((t) => t.category !== "measurement" && (t.saving_eur_month === null || t.saving_eur_month === undefined));
+    const head = (t) => t.category === "measurement" || t.category === "result";
+    const top = a.tips.filter(head);
+    const money = a.tips.filter((t) => !head(t) && t.saving_eur_month !== null && t.saving_eur_month !== undefined);
+    const other = a.tips.filter((t) => !head(t) && (t.saving_eur_month === null || t.saving_eur_month === undefined));
     const rooms = a.rooms
       .map((r) => `<tr>
         <td><b>${esc(r.name)}</b></td>
@@ -992,10 +994,11 @@ class HaClimatePanel extends HTMLElement {
       <div class="bar">
         <p class="muted small grow">Gebaseerd op de laatste ${basis.days} dagen: buiten gemiddeld ${fmt(basis.outdoor_mean, 1, "°C")},
           ongeveer ${fmt(basis.heating_gas_per_day, 1, "m³")} gas per dag voor verwarming (${euro((basis.heating_gas_per_day ?? 0) * basis.gas_price)}).
-          Bedragen per maand gaan uit van weer zoals de afgelopen dagen.
+          Bedragen per maand gaan uit van weer zoals de afgelopen dagen; ‘Huidige instelling werkt’ toont wat de huidige nachtverlaging gemeten oplevert.
           ${basis.calibration !== 1 ? `Bijgesteld met de meting: factor ${fmt(basis.calibration, 2)}.` : ""}</p>
         <button class="btn text" data-action="advice-refresh">↻ Opnieuw berekenen</button>
       </div>
+      <div class="card"><h3>Logboek: wat leverde elke instelling op?</h3>${this._renderPeriods(a.periods)}</div>
       ${money.length ? `<h3 class="section">Wat het kan opleveren</h3>${money.map(tip).join("")}` : ""}
       ${other.length ? `<h3 class="section">Opvallend</h3>${other.map(tip).join("")}` : ""}
       <div class="card">
@@ -1012,7 +1015,7 @@ class HaClimatePanel extends HTMLElement {
           – overdag lager, of een nachtverlaging inclusief het weer opwarmen 's ochtends – bespaart dus het deel
           <i>graad-uren koeler ÷ (24 uur × verschil binnen/buiten)</i> van het gas voor die kamer. Hoe snel een kamer 's nachts afkoelt en weer opwarmt,
           leert HA Climate per kamer uit de metingen (tabblad Analyses → thermisch model). Zodra er ${3} of meer volledige dagen zijn gemeten sinds de
-          startdatum, worden alle schattingen bijgesteld met de verhouding tussen gemeten en voorspelde besparing; na twee weken telt de meting volledig.
+          startdatum, worden alle schattingen bijgesteld (per instelling wordt onthouden wat het model voorspelde, zodat ook na een wijziging verder geleerd wordt) met de verhouding tussen gemeten en voorspelde besparing; na twee weken telt de meting volledig.
           Zo wordt het advies steeds nauwkeuriger.</p>
       </details>`;
   }
@@ -1105,8 +1108,48 @@ class HaClimatePanel extends HTMLElement {
         <div class="tile"><div class="muted small">Vandaag tot nu (voorlopig)</div><div class="mid">${fmt(e.saved_today, 2)}<small>m³</small></div>
           <div class="muted small">${fmt(e.gas_today, 2)} van ${fmt(e.expected_today, 2)} m³ verwacht</div></div>
       </div>
+      ${this._renderFireplaceDays()}
+      <h3 class="sub">Wat leverde elke instelling op?</h3>
+      ${this._renderPeriods(this._state.periods)}
       <p class="muted small">Een enkele dag zegt weinig (zon, wind, tapwater, bezoek); kijk na een week naar het totaal. Een andere startdatum leert de vergelijking opnieuw uit de dagen daarvóór.</p>
     </div>`;
+  }
+
+  /* Every change of the night setting starts a new period; its measured result is kept. */
+  _renderPeriods(periods) {
+    if (!periods || !periods.length) return '<p class="muted small">Nog geen instellingen bijgehouden.</p>';
+    const price = this._state.energy?.gas_price ?? 0;
+    const rows = [...periods]
+      .reverse()
+      .map((p) => {
+        const until = p.current ? "nu" : dateLabel(p.end);
+        const pct = p.fraction === null || p.fraction === undefined ? null : p.fraction * 100;
+        const color = pct === null ? "" : pct >= 2 ? "good" : pct <= -2 ? "bad" : "";
+        return `<tr class="${p.current ? "current" : ""}">
+          <td>${dateLabel(p.start)} – ${until}</td>
+          <td>${esc(p.text)}${p.current ? ' <span class="chip" style="--chip:var(--accent)">nu</span>' : ""}</td>
+          <td>${p.days}${p.fireplace_days ? `<br><small class="muted">+${p.fireplace_days} openhaard</small>` : ""}</td>
+          <td>${p.days ? `${fmt(p.actual, 1)} / ${fmt(p.expected, 1)} m³` : "–"}</td>
+          <td class="${color}"><b>${pct === null ? "–" : `${pct > 0 ? "−" : "+"}${fmt(Math.abs(pct), 0)} %`}</b></td>
+          <td>${p.per_day !== null && p.per_day !== undefined ? `${euro(p.per_day * 30 * price)}` : "–"}</td>
+        </tr>`;
+      })
+      .join("");
+    return `<div class="table-wrap"><table class="ranking periods">
+      <thead><tr><th>Periode</th><th>Instelling</th><th>Dagen</th><th>Verbruikt / verwacht</th><th>Verschil</th><th>€ per maand</th></tr></thead>
+      <tbody>${rows}</tbody></table></div>
+      <p class="muted small">Elke wijziging van de nachtverlaging (tijden, verlaging, aan/uit, per kamer) start een nieuwe periode; een wijziging na 12:00 telt vanaf de
+        volgende dag. Alleen volledige dagen tellen, dagen met de openhaard niet. − = minder gas dan verwacht (bespaard).</p>`;
+  }
+
+  _renderFireplaceDays() {
+    const fp = this._state.fireplace;
+    const days = Object.entries(fp.recent || {});
+    if (!fp.configured || !days.length) return "";
+    return `<div class="fp-days muted small">🔥 Openhaard gedetecteerd: ${days
+      .map(([d, m]) => `<span class="fp-day">${dateLabel(d)} ${m} min${this._admin ? ` <button class="btn text small" data-action="fireplace-clear" data-day="${d}">klopt niet</button>` : ""}</span>`)
+      .join("")}
+      <br>Dagen met ≥ 30 min openhaard tellen niet mee in de meting. Brandde hij niet (bijv. na het handmatig lager zetten)? Klik op <i>klopt niet</i>.</div>`;
   }
 
   /* ----- Settings ----- */
@@ -1350,6 +1393,32 @@ class HaClimatePanel extends HTMLElement {
       case "edit-temp":
         this._editTemp(el, el.dataset.kind, el.dataset.room);
         break;
+      case "fireplace-clear":
+        if (confirm(`Openhaard-minuten van ${dateLabel(el.dataset.day)} wissen?`)) {
+          await this._call({ type: "ha_climate/fireplace/clear", day: el.dataset.day }, "Openhaard-dag gewist");
+          if (this._tab === "analytics") {
+            await this._loadHistory();
+            this._render();
+          }
+        }
+        break;
+      case "apply-tip": {
+        const tip = this._advice?.tips.find((t) => t.id === el.dataset.tip);
+        const act = tip?.action;
+        if (!act) break;
+        const what = act.master === false ? "nachtverlaging uit" : `${fmt(act.night_offset, 1, "°C")}, ${act.night_start}–${act.night_end}`;
+        if (!confirm(`Nachtverlaging terugzetten naar: ${what}?`)) break;
+        if (act.master !== false) {
+          await this._call({ type: "ha_climate/settings/save", settings: { night_start: act.night_start, night_end: act.night_end, night_offset: act.night_offset } });
+        }
+        if (act.master !== undefined && act.master !== this._state.master) {
+          await this._call({ type: "ha_climate/master/set", enabled: act.master });
+        }
+        this._toast("Instelling teruggezet; dit start een nieuwe meetperiode");
+        await this._loadAdvice(true);
+        this._render();
+        break;
+      }
       case "advice-refresh":
         this._advice = null;
         this._render();
@@ -1972,6 +2041,12 @@ const STYLE = `
   details.card.optional { margin-top: 0; padding-top: 4px; }
   .save-bar { position: sticky; bottom: 0; display: flex; justify-content: flex-end; padding: 12px 0;
     background: linear-gradient(transparent, var(--primary-background-color, #fafafa) 40%); }
+  table.periods td.good b { color: #43a047; }
+  table.periods td.bad b { color: #e53935; }
+  table.periods tr.current td { background: color-mix(in srgb, var(--accent) 7%, transparent); }
+  .fp-days { margin: 8px 0; line-height: 1.8; }
+  .fp-day { margin-right: 12px; white-space: nowrap; }
+  .actions.left { justify-content: flex-start; }
   /* tips */
   .section { margin: 8px 4px 12px; font-weight: 500; font-size: 16px; }
   .grow { flex: 1; min-width: 240px; margin: 0; }

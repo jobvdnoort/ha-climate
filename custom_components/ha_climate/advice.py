@@ -69,6 +69,13 @@ class HouseInput:
     global_offset: float = -2.0
     global_hours: float = 9.0
     boiler_cycling: bool = False
+    # Learning across setting periods: Σ predicted saving (m³) of earlier
+    # periods whose prediction is known, and the expected gas of the days
+    # without a known prediction (None = all measured days).
+    predicted_saving_known: float = 0.0
+    expected_unknown: float | None = None
+    # Measured result per setting period (oldest first, the current one last).
+    periods: list[dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -76,7 +83,7 @@ class Tip:
     """A single piece of advice."""
 
     id: str
-    category: str  # "measurement", "night", "day", "room", "boiler"
+    category: str  # "measurement", "result", "night", "day", "room", "boiler"
     title: str
     text: str
     saving_m3_month: float | None = None
@@ -85,6 +92,7 @@ class Tip:
     room_id: str | None = None
     details: list[str] = field(default_factory=list)
     priority: float = 0.0
+    action: dict[str, Any] | None = None  # e.g. restore earlier night settings
 
 
 # ---------------------------------------------------------------------------
@@ -263,9 +271,13 @@ def calibration(house: HouseInput, predicted_fraction: float) -> tuple[float, fl
     if house.measured_days < MIN_MEASURED_DAYS or house.measured_expected <= 0:
         return 1.0, None
     measured = (house.measured_expected - house.measured_actual) / house.measured_expected
-    if predicted_fraction <= 0.005:
+    unknown = (
+        house.measured_expected if house.expected_unknown is None else house.expected_unknown
+    )
+    predicted = house.predicted_saving_known + predicted_fraction * unknown
+    if predicted / house.measured_expected <= 0.005:
         return 1.0, measured
-    raw = min(2.5, max(0.3, measured / predicted_fraction))
+    raw = min(2.5, max(0.3, (measured * house.measured_expected) / predicted))
     weight = min(1.0, house.measured_days / FULL_CALIBRATION_DAYS)
     return 1 + (raw - 1) * weight, measured
 
@@ -322,6 +334,8 @@ def build_advice(rooms: list[RoomInput], house: HouseInput) -> dict[str, Any]:
                 f" De schattingen hieronder zijn daarom met factor {_fmt(factor, 2)} bijgesteld."
             )
         b.add(Tip("measurement", "measurement", "Gemeten resultaat", text, priority=1e6))
+
+    _period_tips(b, house)
 
     if not usable:
         b.add(
@@ -554,6 +568,82 @@ def build_advice(rooms: list[RoomInput], house: HouseInput) -> dict[str, Any]:
     return _result(b, rooms, house, shares, predicted, factor, measured)
 
 
+MIN_PERIOD_DAYS = 3  # days before a setting period is judged
+REVERT_MARGIN = 0.03  # 3 %-points better before reverting is advised
+
+
+def _period_tips(b: _Builder, house: HouseInput) -> None:
+    """Judge the current setting against what earlier settings achieved."""
+    if not house.periods:
+        return
+    current = house.periods[-1]
+    days = current.get("days", 0)
+    fraction = current.get("fraction")
+    if days < MIN_PERIOD_DAYS or fraction is None:
+        return
+    per_day = current.get("per_day") or 0.0
+    month = per_day * DAYS_PER_MONTH
+    earlier = [
+        p
+        for p in house.periods[:-1]
+        if p.get("days", 0) >= MIN_PERIOD_DAYS and p.get("fraction") is not None
+    ]
+    best = max(earlier, key=lambda p: p["fraction"], default=None)
+    since = f"sinds {current.get('start_label', current.get('start'))}"
+    if best is not None and best["fraction"] - fraction > REVERT_MARGIN:
+        gain = (best["fraction"] - fraction) * (current.get("expected", 0) / days)
+        tip = Tip(
+            "revert",
+            "result",
+            "Vorige instelling deed het beter – terugzetten?",
+            f"Nu ({current['text']}) is {_fmt(100 * fraction, 0)} % bespaard over {days} dagen. "
+            f"Met \"{best['text']}\" was dat {_fmt(100 * best['fraction'], 0)} % over "
+            f"{best['days']} dagen. Verschillen van een paar procent kunnen ook door het weer "
+            "komen; bij een duidelijk verschil is terugzetten verstandig.",
+            confidence="redelijk" if min(days, best["days"]) >= 7 else "laag",
+            priority=5e5,
+            action={"label": "Terugzetten", **(best.get("settings") or {})},
+        )
+        tip.saving_m3_month = round(gain * DAYS_PER_MONTH, 1)
+        tip.saving_eur_month = round(gain * DAYS_PER_MONTH * house.gas_price, 2)
+        b.tips.append(tip)
+        return
+    if fraction < 0 and days >= MIN_PERIOD_DAYS + 2 and house.master_enabled:
+        b.tips.append(
+            Tip(
+                "no-effect",
+                "result",
+                "Huidige instelling levert (nog) niets op",
+                f"{since.capitalize()} ({current['text']}) is er {_fmt(-100 * fraction, 0)} % "
+                f"méér gas verbruikt dan verwacht over {days} dagen. Bij vloerverwarming kan het "
+                "'s ochtends opwarmen de besparing van de nacht tenietdoen. Probeer een kleinere "
+                "verlaging of zet hem terug"
+                + (f" naar \"{best['text']}\"." if best else "."),
+                confidence="laag" if days < 7 else "redelijk",
+                priority=5e5,
+                action={"label": "Terugzetten", **(best.get("settings") or {})} if best else None,
+            )
+        )
+        return
+    if fraction > 0:
+        tip = Tip(
+            "works",
+            "result",
+            "Huidige instelling werkt",
+            f"{since.capitalize()} ({current['text']}) is {_fmt(100 * fraction, 0)} % bespaard "
+            f"over {days} dagen" + (
+                f", tegen {_fmt(100 * best['fraction'], 0)} % met \"{best['text']}\"."
+                if best
+                else "."
+            ),
+            confidence="redelijk" if days >= 7 else "laag",
+            priority=5e5,
+        )
+        tip.saving_m3_month = round(month, 1)
+        tip.saving_eur_month = round(month * house.gas_price, 2)
+        b.tips.append(tip)
+
+
 def _result(b, rooms, house, shares, predicted, factor, measured) -> dict[str, Any]:
     tips = sorted(b.tips, key=lambda t: -t.priority)
     return {
@@ -568,6 +658,7 @@ def _result(b, rooms, house, shares, predicted, factor, measured) -> dict[str, A
                 "confidence": t.confidence,
                 "room_id": t.room_id,
                 "details": t.details,
+                "action": t.action,
             }
             for t in tips
         ],

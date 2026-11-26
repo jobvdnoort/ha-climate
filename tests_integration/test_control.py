@@ -188,6 +188,15 @@ async def test_savings_start_events_and_export(hass, ha_climate_enabled, hass_ws
     assert "Nachtverlaging uit (alle thermostaten, -2,0 °C, 22:00–06:30)" in texts
     assert "Nachtverlaging aangepast: -1,5 °C, 21:30–06:30" in texts
 
+    # Every night setting gets its own measured period.
+    periods = coordinator.setting_periods()
+    assert periods[0]["start"] == start.isoformat()
+    assert periods[0]["days"] == 10
+    assert periods[0]["text"] == "Nachtverlaging -2,0 °C, 22:00–06:30"
+    assert periods[-1]["current"] is True
+    assert periods[-1]["text"] == "Nachtverlaging uit"
+    assert periods[-1]["settings"]["night_offset"] == -1.5
+
     # Export contains every stored day and today's events.
     await client.send_json_auto_id({"type": "ha_climate/export"})
     msg = await client.receive_json()

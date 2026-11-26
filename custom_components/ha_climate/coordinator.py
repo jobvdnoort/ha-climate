@@ -175,6 +175,9 @@ _LOGGER = logging.getLogger(__name__)
 type HaClimateConfigEntry = ConfigEntry[HaClimateCoordinator]
 
 
+MONTHS = ("jan", "feb", "mrt", "apr", "mei", "jun", "jul", "aug", "sep", "okt", "nov", "dec")
+
+
 def _float_or_none(value: Any) -> float | None:
     """Convert a state/attribute value to float."""
     if value in (None, STATE_UNKNOWN, STATE_UNAVAILABLE, ""):
@@ -385,6 +388,8 @@ class HaClimateCoordinator(DataUpdateCoordinator[EnergyData]):
         history.setdefault("indoor", {})
         history.setdefault("events", [])  # [{"ts", "type", "room", "text"}]
         history.setdefault("boiler", {})  # {"days": {day: {...}}}
+        # Setting periods: [{"start", "key", "text", "settings", "predicted"}]
+        history.setdefault("periods", [])
         self.boiler = BoilerTracker.from_dict(
             history["boiler"], track_flame=bool(self.config.get(CONF_BOILER_FLAME))
         )
@@ -406,6 +411,7 @@ class HaClimateCoordinator(DataUpdateCoordinator[EnergyData]):
                 history["models"].get(room[CONF_ROOM_ID])
             )
         self._log_night_setting_changes()
+        self._track_period()
 
     # ------------------------------------------------------------------
     # Event log (kept permanently in the history store)
@@ -478,6 +484,118 @@ class HaClimateCoordinator(DataUpdateCoordinator[EnergyData]):
             self.log_event(
                 "settings", f"Nachtverlaging {names[room_id]} {verb}: {text}", room_id
             )
+
+    # ------------------------------------------------------------------
+    # Setting periods: what did each night setting achieve?
+    # ------------------------------------------------------------------
+    def _setting_key(self) -> dict[str, Any]:
+        rooms = {
+            room[CONF_ROOM_ID]: (
+                self._night_description(room) if self.room_enabled(room[CONF_ROOM_ID]) else "uit"
+            )
+            for room in self.rooms
+        }
+        return {"master": self.master_enabled, "global": self._night_description(), "rooms": rooms}
+
+    def _setting_text(self, key: dict[str, Any]) -> str:
+        if not key["master"]:
+            return "Nachtverlaging uit"
+        names = {room[CONF_ROOM_ID]: room[CONF_ROOM_NAME] for room in self.rooms}
+        text = f"Nachtverlaging {key['global']}"
+        other = [
+            f"{names.get(room_id, room_id)}: {desc}"
+            for room_id, desc in key["rooms"].items()
+            if desc != key["global"]
+        ]
+        return f"{text} ({'; '.join(other)})" if other else text
+
+    def _track_period(self, now: datetime | None = None) -> None:
+        """Start a new setting period when the night settings changed.
+
+        A change in the afternoon or evening mainly affects the next day (the
+        night and the morning reheat), so it counts from the next day.
+        """
+        now = dt_util.as_local(now or dt_util.now())
+        key = self._setting_key()
+        cfg = self.config
+        entry = {
+            "key": key,
+            "text": self._setting_text(key),
+            "settings": {
+                "master": key["master"],
+                "night_start": str(cfg.get(CONF_NIGHT_START) or DEFAULT_NIGHT_START)[:5],
+                "night_end": str(cfg.get(CONF_NIGHT_END) or DEFAULT_NIGHT_END)[:5],
+                "night_offset": float(cfg.get(CONF_NIGHT_OFFSET, DEFAULT_NIGHT_OFFSET)),
+            },
+        }
+        periods: list[dict[str, Any]] = self._history["periods"]
+        if periods and periods[-1]["key"] == key:
+            return
+        effective = now.date() if now.hour < 12 else now.date() + timedelta(days=1)
+        if not periods:
+            effective = min(effective, self._measurement_start())
+        elif len(periods) > 1 and periods[-1]["start"] >= effective.isoformat():
+            # Changed again before the previous change took effect.
+            periods.pop()
+            if periods and periods[-1]["key"] == key:
+                self._async_save_history()
+                return
+        periods.append({"start": effective.isoformat(), **entry})
+        self._async_save_history()
+
+    def setting_periods(self) -> list[dict[str, Any]]:
+        """Measured result of every setting period since the savings start."""
+        periods = self._history.get("periods", [])
+        if not periods:
+            return []
+        today = dt_util.now().date()
+        start = self._measurement_start()
+        fireplace_days, _ = self._excluded_days()
+        rows = [
+            r
+            for r in self._day_rows(self._stored_records(start, today), include_today=False)
+            if r["gas"] is not None and r["expected"] is not None
+        ]
+        result = []
+        for index, period in enumerate(periods):
+            begin = date.fromisoformat(period["start"])
+            if index == 0:
+                # Days before the first tracked change had that same setting.
+                begin = min(begin, start)
+            end = (
+                date.fromisoformat(periods[index + 1]["start"])
+                if index + 1 < len(periods)
+                else None
+            )
+            if end is not None and end <= start:
+                continue  # entirely before the measurement
+            in_period = [
+                r
+                for r in rows
+                if begin <= date.fromisoformat(r["date"])
+                and (end is None or date.fromisoformat(r["date"]) < end)
+            ]
+            used = [r for r in in_period if date.fromisoformat(r["date"]) not in fireplace_days]
+            expected = sum(r["expected"] for r in used)
+            actual = sum(r["gas"] for r in used)
+            result.append(
+                {
+                    "start": max(begin, start).isoformat(),
+                    "end": (end - timedelta(days=1)).isoformat() if end else None,
+                    "current": end is None,
+                    "text": period["text"],
+                    "settings": period.get("settings"),
+                    "predicted": period.get("predicted"),
+                    "days": len(used),
+                    "fireplace_days": len(in_period) - len(used),
+                    "expected": expected,
+                    "actual": actual,
+                    "saved": expected - actual,
+                    "fraction": (expected - actual) / expected if expected > 0 else None,
+                    "per_day": (expected - actual) / len(used) if used else None,
+                }
+            )
+        return result
 
     @callback
     def _async_save(self) -> None:
@@ -613,6 +731,7 @@ class HaClimateCoordinator(DataUpdateCoordinator[EnergyData]):
             )
         self._stored["master"] = enabled
         self._async_save()
+        self._track_period()
         await self._async_evaluate_setback(dt_util.now())
         self.async_update_listeners()
 
@@ -627,6 +746,7 @@ class HaClimateCoordinator(DataUpdateCoordinator[EnergyData]):
             )
         self._stored["room_enabled"][room_id] = enabled
         self._async_save()
+        self._track_period()
         await self._async_evaluate_setback(dt_util.now())
         self.async_update_listeners()
 
@@ -1224,6 +1344,24 @@ class HaClimateCoordinator(DataUpdateCoordinator[EnergyData]):
         """Return the number of minutes the fireplace burned today."""
         return int(self._stored["fireplace_minutes"].get(dt_util.now().date().isoformat(), 0))
 
+    def fireplace_recent(self, days: int = 7) -> dict[str, int]:
+        """Fireplace minutes of the last days (only days with minutes)."""
+        cutoff = (dt_util.now().date() - timedelta(days=days)).isoformat()
+        return {
+            day: int(minutes)
+            for day, minutes in sorted(self._stored["fireplace_minutes"].items())
+            if day > cutoff and minutes
+        }
+
+    def clear_fireplace_day(self, day: date) -> None:
+        """Forget a wrongly detected fireplace day (e.g. after a lower setpoint)."""
+        self._stored["fireplace_minutes"].pop(day.isoformat(), None)
+        if day == dt_util.now().date():
+            self.fireplace.reset()
+        self._advice = None
+        self._async_save()
+        self.async_update_listeners()
+
     # ------------------------------------------------------------------
     # Baseline & history
     # ------------------------------------------------------------------
@@ -1738,6 +1876,11 @@ class HaClimateCoordinator(DataUpdateCoordinator[EnergyData]):
             )
         cfg = self.config
         boiler = self.boiler_status() if self.boiler_configured else None
+        periods = self.setting_periods()
+        for period in periods:
+            day = date.fromisoformat(period["start"])
+            period["start_label"] = f"{day.day} {MONTHS[day.month - 1]}"
+        known = [p for p in periods[:-1] if p["predicted"] is not None and p["days"]]
         house = HouseInput(
             outdoor_mean=outdoor,
             heating_gas_per_day=heating_gas,
@@ -1753,8 +1896,20 @@ class HaClimateCoordinator(DataUpdateCoordinator[EnergyData]):
                 parse_time(cfg.get(CONF_NIGHT_END) or DEFAULT_NIGHT_END),
             ),
             boiler_cycling=bool(boiler and boiler.get("cycling")),
+            predicted_saving_known=sum(p["predicted"] * p["expected"] for p in known),
+            expected_unknown=sum(r["expected"] for r in measured)
+            - sum(p["expected"] for p in known),
+            periods=periods,
         )
         result = build_advice(rooms, house)
+        result["periods"] = periods
+        # Remember what the model predicted for the current setting, so the
+        # measurement of this period can calibrate later advice.
+        stored = self._history["periods"]
+        predicted = result["basis"]["predicted_fraction"]
+        if stored and stored[-1].get("predicted") != round(predicted, 4):
+            stored[-1]["predicted"] = round(predicted, 4)
+            self._async_save_history()
         result["basis"]["measurement_start"] = self._measurement_start().isoformat()
         result["basis"]["generated"] = now.isoformat()
         self._advice = (now, result)

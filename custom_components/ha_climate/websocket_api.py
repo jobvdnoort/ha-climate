@@ -186,6 +186,7 @@ def async_register_websocket_api(hass: HomeAssistant) -> None:
         ws_set_room_temperature,
         ws_airco,
         ws_advice,
+        ws_fireplace_clear,
         ws_history,
         ws_boiler_trace,
         ws_save_room,
@@ -371,10 +372,12 @@ async def ws_state(hass, connection, msg, entry: HaClimateConfigEntry) -> None:
                 "delta_to_target": _round(detector.delta_to_target, 2),
                 "rise": _round(detector.rise, 2),
                 "minutes_today": coordinator.fireplace_minutes_today(),
+                "recent": coordinator.fireplace_recent(),
             },
             "boiler": coordinator.boiler_status(),
             "rooms": [_room_payload(coordinator, room) for room in coordinator.rooms],
             "ranking": coordinator.room_ranking(),
+            "periods": coordinator.setting_periods(),
             "now": dt_util.now().isoformat(),
         },
     )
@@ -715,3 +718,19 @@ async def ws_advice(hass, connection, msg, entry: HaClimateConfigEntry) -> None:
         connection.send_error(msg["id"], "failed", "Tips konden niet worden berekend")
         return
     connection.send_result(msg["id"], result)
+
+
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): "ha_climate/fireplace/clear",
+        vol.Optional("entry_id"): str,
+        vol.Required("day"): _date,
+    }
+)
+@websocket_api.require_admin
+@websocket_api.async_response
+@_with_entry
+async def ws_fireplace_clear(hass, connection, msg, entry: HaClimateConfigEntry) -> None:
+    """Forget the fireplace minutes of a day that was detected wrongly."""
+    entry.runtime_data.clear_fireplace_day(date.fromisoformat(msg["day"]))
+    connection.send_result(msg["id"], {})

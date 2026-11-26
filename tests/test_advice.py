@@ -111,3 +111,36 @@ def test_disabled_setback_and_no_data():
     assert "night-deeper" not in tips
     empty = adv.build_advice(rooms, _house(heating_gas_per_day=None))
     assert [t["id"] for t in empty["tips"]] == ["measurement", "no-data"]
+
+
+def _period(text, days, fraction, current=False, expected=50.0):
+    return {
+        "text": text, "days": days, "fraction": fraction, "current": current, "start": "2026-11-27",
+        "expected": expected, "per_day": fraction * expected / days if days else None,
+        "settings": {"master": True, "night_start": "21:00", "night_end": "06:00", "night_offset": -1.5},
+    }
+
+
+def test_revert_tip_when_earlier_setting_did_better():
+    periods = [_period("Nachtverlaging -1,5 °C", 10, 0.08), _period("Nachtverlaging -3,0 °C", 5, 0.02, True)]
+    result = adv.build_advice(_rooms(offset=-3), _house(periods=periods))
+    tip = next(t for t in result["tips"] if t["id"] == "revert")
+    assert tip["action"]["night_offset"] == -1.5
+    assert tip["saving_m3_month"] > 0
+
+
+def test_works_tip_and_no_judgement_too_early():
+    periods = [_period("Nachtverlaging -1,5 °C", 4, 0.06, True)]
+    ids = [t["id"] for t in adv.build_advice(_rooms(offset=-1.5), _house(periods=periods))["tips"]]
+    assert "works" in ids
+    periods = [_period("Nachtverlaging -1,5 °C", 2, -0.2, True)]
+    ids = [t["id"] for t in adv.build_advice(_rooms(offset=-1.5), _house(periods=periods))["tips"]]
+    assert not {"works", "revert", "no-effect"} & set(ids)
+
+
+def test_no_effect_tip():
+    periods = [_period("Nachtverlaging uit", 8, 0.0), _period("Nachtverlaging -2,0 °C", 6, -0.05, True)]
+    tip = next(
+        t for t in adv.build_advice(_rooms(offset=-2), _house(periods=periods))["tips"] if t["id"] in ("revert", "no-effect")
+    )
+    assert tip["id"] == "revert"  # the earlier setting did better
