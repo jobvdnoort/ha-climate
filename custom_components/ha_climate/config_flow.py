@@ -26,6 +26,7 @@ from .const import (
     CONF_FIREPLACE_THRESHOLD,
     CONF_GAS_PRICE,
     CONF_DD_INDOOR_CORRECTION,
+    CONF_DD_REFERENCE_TEMP,
     CONF_GAS_FIXED_COSTS,
     CONF_GAS_FIXED_COSTS_UNIT,
     CONF_GAS_PRICE_ENTITY,
@@ -46,6 +47,7 @@ from .const import (
     CONF_ROOM_VALVES,
     CONF_ROOMS,
     DEFAULT_BASELINE_DAYS,
+    DEFAULT_DD_REFERENCE_TEMP,
     DEFAULT_COMFORT_TIME,
     DEFAULT_FIXED_COSTS_UNIT,
     DEFAULT_FIREPLACE_THRESHOLD,
@@ -126,6 +128,18 @@ def _general_schema(values: dict[str, Any]) -> vol.Schema:
                 CONF_DD_INDOOR_CORRECTION,
                 default=values.get(CONF_DD_INDOOR_CORRECTION, False),
             ): selector.BooleanSelector(),
+            vol.Required(
+                CONF_DD_REFERENCE_TEMP,
+                default=values.get(CONF_DD_REFERENCE_TEMP) or DEFAULT_DD_REFERENCE_TEMP,
+            ): selector.NumberSelector(
+                selector.NumberSelectorConfig(
+                    min=15,
+                    max=25,
+                    step=0.1,
+                    unit_of_measurement="°C",
+                    mode=selector.NumberSelectorMode.BOX,
+                )
+            ),
             vol.Required(
                 CONF_HEATING_LIMIT,
                 default=values.get(CONF_HEATING_LIMIT, DEFAULT_HEATING_LIMIT),

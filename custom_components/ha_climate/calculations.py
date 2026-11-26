@@ -328,11 +328,12 @@ def corrected_heating_limit(
     mean_target: float | None,
     reference: float = REFERENCE_INDOOR_TEMPERATURE,
 ) -> float:
-    """Shift the heating limit by the deviation of the indoor target from 20 °C.
+    """Shift the heating limit by the deviation of the indoor target from a reference.
 
     The usual 18 °C heating limit assumes ~20 °C inside (internal gains cover
     the last 2 °C). A house kept at 21 °C starts heating at ~19 °C outside, a
-    house kept at 19 °C at ~17 °C.
+    house kept at 19 °C at ~17 °C. ``reference`` is the comfort temperature of
+    the baseline period; days without a known target count as that reference.
     """
     if mean_target is None:
         return heating_limit

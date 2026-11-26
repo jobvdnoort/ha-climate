@@ -13,13 +13,14 @@
           "baseline_days": "Historie voor baseline (dagen, 0 = alles)",
           "gas_fixed_costs": "Vaste leveringskosten",
           "gas_fixed_costs_unit": "Eenheid vaste kosten",
-          "degree_day_indoor_correction": "Graaddagen corrigeren voor binnentemperatuur"
+          "degree_day_indoor_correction": "Graaddagen corrigeren voor comforttemperatuur",
+          "degree_day_reference_temp": "Referentie-comforttemperatuur (°C)"
         },
         "data_description": {
           "heating_limit": "Graaddagen = max(0, stookgrens − gemiddelde buitentemperatuur). Standaard 18 °C.",
           "baseline_days": "0 = alle dagen vanaf het eerste moment dat beide sensoren data hebben.",
           "gas_fixed_costs": "Optioneel (vastrecht, netbeheer). Een maandbedrag wordt omgerekend naar dagkosten (÷ 30,4375) en telt mee in de totale gaskosten, niet in de besparing.",
-          "degree_day_indoor_correction": "Verschuift de stookgrens met het verschil tussen de gemiddelde ingestelde binnentemperatuur en 20 °C."
+          "degree_day_indoor_correction": "Verschuift de stookgrens met het verschil tussen de gemiddelde comforttemperatuur (dagtemperatuur) van de kamers – zonder nachtverlaging – en de referentie: de temperatuur waarop het huis in de baselineperiode werd verwarmd. Dagen zonder bekende temperatuur tellen als de referentie."
         }
       },
       "night": {
@@ -74,13 +75,14 @@
           "baseline_days": "Historie voor baseline (dagen, 0 = alles)",
           "gas_fixed_costs": "Vaste leveringskosten",
           "gas_fixed_costs_unit": "Eenheid vaste kosten",
-          "degree_day_indoor_correction": "Graaddagen corrigeren voor binnentemperatuur"
+          "degree_day_indoor_correction": "Graaddagen corrigeren voor comforttemperatuur",
+          "degree_day_reference_temp": "Referentie-comforttemperatuur (°C)"
         },
         "data_description": {
           "heating_limit": "Graaddagen = max(0, stookgrens − gemiddelde buitentemperatuur). Standaard 18 °C.",
           "baseline_days": "0 = alle dagen vanaf het eerste moment dat beide sensoren data hebben.",
           "gas_fixed_costs": "Optioneel (vastrecht, netbeheer). Een maandbedrag wordt omgerekend naar dagkosten (÷ 30,4375) en telt mee in de totale gaskosten, niet in de besparing.",
-          "degree_day_indoor_correction": "Verschuift de stookgrens met het verschil tussen de gemiddelde ingestelde binnentemperatuur en 20 °C."
+          "degree_day_indoor_correction": "Verschuift de stookgrens met het verschil tussen de gemiddelde comforttemperatuur (dagtemperatuur) van de kamers – zonder nachtverlaging – en de referentie: de temperatuur waarop het huis in de baselineperiode werd verwarmd. Dagen zonder bekende temperatuur tellen als de referentie."
         }
       },
       "night": {

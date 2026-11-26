@@ -571,6 +571,7 @@ class HaClimatePanel extends HTMLElement {
           ${b.first_day ? `van ${dateLabel(b.first_day)} t/m ${dateLabel(b.last_day)}` : ""}.
           ${b.overlap_start ? `Beide sensoren hebben data vanaf <b>${dateLabel(b.overlap_start)}</b>; ` : ""}${b.days_stored ? `${b.days_stored} dagen permanent opgeslagen.` : ""}
           ${excluded ? `Overgeslagen: ${excluded}.` : ""}
+          ${b.indoor_correction ? `Graaddagen gecorrigeerd voor de comforttemperatuur t.o.v. ${fmt(b.reference_temperature, 1, "°C")}.` : ""}
           ${b.updated ? `Laatst berekend ${dateLabel(b.updated)} ${timeOf(b.updated)}.` : ""}
         </p>
       </div>
@@ -804,6 +805,8 @@ class HaClimatePanel extends HTMLElement {
           { name: "Buiten gem.", type: "tooltip", axis: "left", color: "#78909c", values: rows.map((r) => r.mean_temperature), unit: "°C" },
           { name: "Binnen gemeten", type: "tooltip", axis: "left", color: "#ef6c00", values: rows.map((r) => r.indoor_temperature), unit: "°C" },
           { name: "Binnen doel", type: "tooltip", axis: "left", color: "#8e24aa", values: rows.map((r) => r.indoor_target), unit: "°C" },
+          { name: "Comfort (dag)", type: "tooltip", axis: "left", color: "#5e35b1", values: rows.map((r) => r.indoor_comfort), unit: "°C" },
+          { name: "Stookgrens", type: "tooltip", axis: "left", color: "#9e9e9e", values: rows.map((r) => (this._state.baseline.indoor_correction ? r.heating_limit : null)), unit: "°C" },
         ],
         events: rows.map((r) => r.events || []),
       });
@@ -1001,7 +1004,14 @@ class HaClimatePanel extends HTMLElement {
           <label class="field"><span>Startdatum besparing</span><input name="savings_start" type="date" value="${esc(st.savings_start || "")}" ${dis}></label>
         </div>
         <label class="check inline"><input type="checkbox" name="degree_day_indoor_correction" ${st.degree_day_indoor_correction ? "checked" : ""} ${dis}>
-          <span>Graaddagen corrigeren voor de gemiddelde ingestelde binnentemperatuur (stookgrens + (doel − 20 °C))</span></label>
+          <span>Graaddagen corrigeren voor de comforttemperatuur (stookgrens + (comforttemperatuur − referentie))</span></label>
+        <div class="form-grid">
+          <label class="field"><span>Referentie-comforttemperatuur (°C)</span><input name="degree_day_reference_temp" type="number" step="0.1" min="15" max="25" value="${st.degree_day_reference_temp ?? 20}" ${dis}></label>
+        </div>
+        <p class="muted small">De comforttemperatuur is de gemiddelde dagtemperatuur van de kamers, <b>zonder nachtverlaging</b> – die blijft dus als besparing zichtbaar.
+          Vul als referentie de temperatuur in waarop je het huis in de baselineperiode verwarmde. Zet je de kamers later warmer, dan stijgt het verwachte verbruik mee
+          (en andersom). Dagen zonder bekende comforttemperatuur, zoals de dagen vóór installatie, tellen als de referentie; zo gebruiken baseline en metingen dezelfde regel.
+          Na het wijzigen wordt de baseline herberekend; een bevroren baseline blijft staan.</p>
         ${this._renderFreeze(true)}
         <h3>Nachtverlaging (algemeen)</h3>
         <div class="form-grid">
@@ -1263,7 +1273,7 @@ class HaClimatePanel extends HTMLElement {
       return /[",\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
     };
     const header = [
-      "datum", "buiten_temp_gem_c", "binnen_temp_gem_c", "binnen_doel_gem_c", "stookgrens_c", "graaddagen",
+      "datum", "buiten_temp_gem_c", "binnen_temp_gem_c", "binnen_doel_gem_c", "binnen_comfort_gem_c", "stookgrens_c", "graaddagen",
       "gas_werkelijk_m3", "gas_verwacht_m3", "besparing_m3", "besparing_eur", "variabele_kosten_eur",
       "vaste_kosten_eur", "totale_kosten_eur", "openhaard_minuten", "nachtverlaging", "gedeeltelijke_dag", "gebeurtenissen",
     ];
@@ -1285,7 +1295,7 @@ class HaClimatePanel extends HTMLElement {
           ]
         : [];
       lines.push([
-        r.date, num(r.mean_temperature, 2), num(r.indoor_temperature, 2), num(r.indoor_target, 2), num(r.heating_limit, 2),
+        r.date, num(r.mean_temperature, 2), num(r.indoor_temperature, 2), num(r.indoor_target, 2), num(r.indoor_comfort, 2), num(r.heating_limit, 2),
         num(r.degree_days, 2), num(r.gas, 3), num(r.expected, 3), num(r.saved, 3), num(r.saved_eur, 2),
         num(r.cost_variable, 2), num(r.cost_fixed, 2), num(r.cost, 2), r.fireplace_minutes ?? 0,
         r.setback ? "ja" : "nee", r.partial ? "ja" : "nee",
@@ -1362,6 +1372,7 @@ class HaClimatePanel extends HTMLElement {
       gas_fixed_costs_unit: get("gas_fixed_costs_unit"),
       savings_start: get("savings_start") || null,
       degree_day_indoor_correction: form.querySelector('[name="degree_day_indoor_correction"]').checked,
+      degree_day_reference_temp: numOrNull(get("degree_day_reference_temp")),
       night_start: get("night_start"),
       night_end: get("night_end"),
       night_offset: numOrNull(get("night_offset")),
@@ -1370,7 +1381,7 @@ class HaClimatePanel extends HTMLElement {
       fireplace_threshold: numOrNull(get("fireplace_threshold")),
     };
     for (const f of BOILER_FIELDS) settings[f.key] = get(f.key) || null;
-    for (const key of ["heating_limit", "baseline_days", "night_offset", "fireplace_threshold"]) {
+    for (const key of ["heating_limit", "baseline_days", "night_offset", "fireplace_threshold", "degree_day_reference_temp"]) {
       if (settings[key] === null) delete settings[key];
     }
     await this._call({ type: "ha_climate/settings/save", settings }, "Instellingen opgeslagen");
