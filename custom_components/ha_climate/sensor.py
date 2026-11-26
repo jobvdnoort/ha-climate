@@ -174,6 +174,20 @@ SENSORS: tuple[HaClimateSensorDescription, ...] = (
         **EURO,
     ),
     HaClimateSensorDescription(
+        key="gas_cost_today",
+        translation_key="gas_cost_today",
+        value_fn=lambda c, d: d.cost_today,
+        attrs_fn=lambda c, d: {**_attrs_price(c, d), "vaste_kosten_per_dag": d.fixed_costs},
+        **EURO,
+    ),
+    HaClimateSensorDescription(
+        key="gas_cost_yesterday",
+        translation_key="gas_cost_yesterday",
+        value_fn=lambda c, d: d.cost_yesterday,
+        attrs_fn=lambda c, d: {**_attrs_price(c, d), "vaste_kosten_per_dag": d.fixed_costs},
+        **EURO,
+    ),
+    HaClimateSensorDescription(
         key="saved_money_total",
         translation_key="saved_money_total",
         value_fn=lambda c, d: c.to_euro(d.saved_total),
@@ -371,6 +385,8 @@ class RoomModelSensor(HaClimateEntity, SensorEntity):
             "betrouwbaarheid_afkoelen": estimate.cooling_confidence,
             "betrouwbaarheid_opwarmen": estimate.heating_confidence,
             "meetmomenten": estimate.observations,
+            "tijdconstante_uur": _rounded(estimate.time_constant, 1),
+            "fase": self.coordinator.model_status(self._room[CONF_ROOM_ID])["stage"],
         }
         if self.entity_description.key == "heating_start":
             attrs.update(self.coordinator.plans.get(self._room[CONF_ROOM_ID], {}))

@@ -10,10 +10,13 @@
           "gas_price": "Gas price (fixed)",
           "gas_price_entity": "Gas price entity (optional)",
           "heating_limit": "Heating limit",
-          "baseline_days": "History used for baseline (days)"
+          "baseline_days": "History used for baseline (days, 0 = all)",
+          "gas_fixed_costs": "Fixed delivery costs (€/day)"
         },
         "data_description": {
-          "heating_limit": "Degree days = max(0, heating limit − mean outdoor temperature). Default 18 °C."
+          "heating_limit": "Degree days = max(0, heating limit − mean outdoor temperature). Default 18 °C.",
+          "baseline_days": "0 = all days since both sensors have data.",
+          "gas_fixed_costs": "Optional, added to the total gas costs per day (not to the savings)."
         }
       },
       "night": {
@@ -64,10 +67,13 @@
           "gas_price": "Gas price (fixed)",
           "gas_price_entity": "Gas price entity (optional)",
           "heating_limit": "Heating limit",
-          "baseline_days": "History used for baseline (days)"
+          "baseline_days": "History used for baseline (days, 0 = all)",
+          "gas_fixed_costs": "Fixed delivery costs (€/day)"
         },
         "data_description": {
-          "heating_limit": "Degree days = max(0, heating limit − mean outdoor temperature). Default 18 °C."
+          "heating_limit": "Degree days = max(0, heating limit − mean outdoor temperature). Default 18 °C.",
+          "baseline_days": "0 = all days since both sensors have data.",
+          "gas_fixed_costs": "Optional, added to the total gas costs per day (not to the savings)."
         }
       },
       "night": {
@@ -219,6 +225,12 @@
       "saved_money_total": {
         "name": "Savings total"
       },
+      "gas_cost_today": {
+        "name": "Gas costs today"
+      },
+      "gas_cost_yesterday": {
+        "name": "Gas costs yesterday"
+      },
       "room_cooling_rate": {
         "name": "Cooling rate {room}"
       },
@@ -236,7 +248,7 @@
   "services": {
     "recalculate_baseline": {
       "name": "Recalculate baseline",
-      "description": "Re-reads the long-term statistics and recalculates the gas baseline (m³ per degree day).",
+      "description": "Re-reads all long-term statistics (since both sensors have data) for the gas baseline and trains the room models from the thermostats' recorder history.",
       "fields": {
         "config_entry_id": {
           "name": "Configuration",

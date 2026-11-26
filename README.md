@@ -29,7 +29,7 @@ Na installatie verschijnt **HA Climate** (thermostaat-icoon) in de linkerzijbalk
 | Tabblad | Inhoud |
 |---|---|
 | **Kamers** | Kaart per kamer met huidige temperatuur, doeltemperatuur, dagtemperatuur, status (verwarmen / voorverwarmen / nachtverlaging / openhaard actief) en modelbetrouwbaarheid. Kamers toevoegen, bewerken en verwijderen; nachtverlaging per kamer of voor alle thermostaten schakelen. |
-| **Analyses** | Interactieve grafieken (met tooltips): graaddagen vs. werkelijk en verwacht gasverbruik per dag, cumulatieve gasbesparing in m³ of €, en per kamer afkoel-/opwarmsnelheid met betrouwbaarheid. Periode 14 – 365 dagen. |
+| **Analyses** | Totale gaskosten (variabel + vast) voor vandaag, gisteren en de gekozen periode; variabele besparing; interactieve grafieken (met tooltips) van graaddagen vs. werkelijk en verwacht gasverbruik en de cumulatieve besparing in m³ of €. Per kamer (selector) een **Model status**-kaart: confidence, aantal meetpunten (uit historie / live), 3-stappen voortgang (*Data verzamelen → Kamer leren → Voorspellend regelen*), afkoelsnelheid/warmteverlies, opwarmsnelheid en tijdconstante. Bij de baseline en elk kamermodel staat vanaf welke datum en over hoeveel dagen/meetpunten gerekend wordt. Periode 14 – 365 dagen. |
 | **Schema's** | Per kamer: dagtemperatuur, nachttemperatuur (vast) of verlaging (relatief), eigen tijden of de algemene, "op temperatuur om"-tijd en Optimum Start, met de geplande starttijd. |
 | **Instellingen** | Buitentemperatuur- en gassensor, gasprijs (vast of entiteit), stookgrens, historie, algemene nachtverlaging en openhaard. |
 
@@ -44,8 +44,9 @@ Bij het toevoegen kies je:
 | Buitentemperatuur-sensor | `sensor` met `device_class: temperature` en `state_class: measurement` |
 | Gasverbruik-sensor | Gasmeterstand in m³ (`device_class: gas`, `state_class: total_increasing`) |
 | Gasprijs | Vast bedrag in €/m³ en/of een entiteit (sensor/input_number); de entiteit gaat voor |
+| Vaste leveringskosten | Optioneel, € per dag (vastrecht/netbeheer), standaard 0,00; telt mee in de totale gaskosten, niet in de besparing |
 | Stookgrens | Standaard 18,0 °C |
-| Historie voor baseline | Aantal dagen LTS dat wordt gebruikt (standaard 365) |
+| Baseline-periode | Aantal dagen voor de baseline; 0 (standaard) = alles vanaf de eerste dag dat beide sensoren data hebben |
 | Nachtverlaging | Start 22:00, einde 06:30, verlaging −2,0 °C |
 
 Alles hieronder kan ook in het zijbalk-paneel. Via **Configureren** (options flow) kun je daarna:
@@ -63,6 +64,7 @@ Alles hieronder kan ook in het zijbalk-paneel. Via **Configureren** (options flo
 | `sensor` Baseline gas per graaddag | m³/graaddag, met attributen over gebruikte en uitgesloten dagen |
 | `sensor` Verwacht gasverbruik vandaag/gisteren | baseline × graaddagen |
 | `sensor` Werkelijk gasverbruik vandaag/gisteren | uit de statistieken van de gasmeter |
+| `sensor` Gaskosten vandaag/gisteren | variabel verbruik × gasprijs + vaste leveringskosten per dag |
 | `sensor` Bespaard gas vandaag/gisteren/totaal | verwacht − werkelijk (m³); het totaal wordt bewaard en na een herstart hersteld (`RestoreEntity`) |
 | `sensor` Besparing vandaag/gisteren/totaal | idem in €; zonder ingestelde prijs wordt € 1,40/m³ gebruikt (attribuut `prijsbron`) |
 | `sensor` Afkoelsnelheid / Opwarmsnelheid *kamer* | geleerde snelheid in °C/uur bij de huidige binnen-buiten ΔT |
@@ -73,11 +75,13 @@ Alles hieronder kan ook in het zijbalk-paneel. Via **Configureren** (options flo
 | `switch` Nachtverlaging *ruimte* | per ruimte, bijv. "Nachtverlaging Woonkamer en keuken" |
 | `button` Baseline herberekenen | leest de LTS opnieuw uit |
 
-Service: `ha_climate.recalculate_baseline` (optioneel `config_entry_id`, geeft het resultaat terug als response).
+Service: `ha_climate.recalculate_baseline` (optioneel `config_entry_id`, geeft het resultaat terug als response). Deze voert een volledige herberekening uit: gas-baseline én thermische backfill (zie hieronder).
 
 ## Hoe het werkt
 
-**Baseline.** Bij het opstarten, elke nacht om 00:20 en via knop/service worden de dagstatistieken (gemiddelde buitentemperatuur en gasverbruik per dag) uit de recorder gelezen. De baseline is `Σ gas / Σ graaddagen` over alle bruikbare dagen. Uitgesloten worden: dagen zonder volledige data, dagen met < 1 graaddag (vooral warm water), dagen waarop de openhaard ≥ 30 minuten brandde en dagen waarop de nachtverlaging actief was (de baseline moet het verbruik *zonder* besparing weergeven). Als er te weinig schone dagen overblijven (< 7) blijft de laatst geldige baseline staan.
+**Permanente opslag.** Naast de recorder houdt HA Climate een eigen, permanente opslag bij (`.storage/ha_climate.history.<entry>`): alle dagwaarden (gemiddelde buitentemperatuur en gasverbruik) en álle thermische meetblokken per kamer. Daardoor gaat er niets verloren als de recorder na 10 dagen (standaard `purge_keep_days`) states opruimt, en blijft het model over maanden en seizoenen doorleren. Meetblokken liggen op een vast raster van 2 uur en worden op hun starttijd gededupliceerd: herberekenen of opnieuw backfillen maakt nooit dubbele meetpunten.
+
+**Baseline (Long-Term Statistics).** Bij een volledige herberekening (knop, service of paneel) bepaalt HA Climate eerst de vroegste dag waarop zowel de buitentemperatuur- als de gassensor langetermijnstatistieken hebben (de overlap), leest alle dagen vanaf die dag in en slaat ze permanent op. Dagen waarop een van beide sensoren ontbreekt worden overgeslagen. Bij het opstarten en elke nacht om 00:20 worden alleen de laatste dagen bijgewerkt. De baseline is `Σ gas / Σ graaddagen` over alle bruikbare dagen vanaf de overlap (of de laatste *N* dagen als een baseline-periode is ingesteld). Uitgesloten worden: dagen zonder volledige data, dagen met < 1 graaddag (vooral warm water), dagen waarop de openhaard ≥ 30 minuten brandde en dagen waarop de nachtverlaging actief was (de baseline moet het verbruik *zonder* besparing weergeven). Als er te weinig schone dagen overblijven (< 7) blijft de laatst geldige baseline staan.
 
 **Openhaard-detectie.** De openhaard geldt als actief wanneer de vloerverwarming in die ruimte niet verwarmt (`hvac_action` ≠ `heating`) en de temperatuur ten minste de drempel boven de doeltemperatuur ligt, óf binnen een uur ten minste de drempel is gestegen (alleen als de vloerverwarming dat uur niet heeft gestookt, om naverwarming van de vloer niet mee te tellen). Tijdens de nachtverlaging wordt met de oorspronkelijke comforttemperatuur vergeleken. Uitschakelen gebeurt met hysterese (halve drempel). Detectie werkt vanaf het moment van installatie; oudere historie kan niet met terugwerkende kracht worden gecorrigeerd.
 
@@ -89,7 +93,11 @@ Service: `ha_climate.recalculate_baseline` (optioneel `config_entry_id`, geeft h
 * **Opwarmsnelheid** = `h − k × ΔT` (°C/uur) bij volle verwarming,
 * **Betrouwbaarheid** (0–100 %) groeit met het aantal meetmomenten (vol na 60) en daalt bij een grote standaardfout van de schatting. De algemene score is de laagste van afkoelen en opwarmen.
 
-Meetmomenten met gaten, onbekende `hvac_action` of een brandende openhaard worden overgeslagen. Het model wordt bewaard en kan per kamer worden gereset in het paneel.
+Meetmomenten met gaten, onbekende `hvac_action` of een brandende openhaard worden overgeslagen. Alle meetpunten worden permanent bewaard; de fit gebruikt het meest recente seizoen (90 dagen, minimaal de laatste 300 meetpunten). De **tijdconstante** τ = 1/k (uur) geeft aan hoe traag de kamer reageert. Het model kan per kamer worden gereset in het paneel.
+
+**Backfill uit recorder-historie.** Bij een volledige herberekening en wanneer een kamer voor het eerst wordt geladen (bijv. net toegevoegd), leest HA Climate de recorder-historie van de `climate`-entiteiten (`current_temperature`, `temperature`, `hvac_action`) en de buitentemperatuur, vanaf het vroegste moment waarop al deze entiteiten historie hebben. Uit die historie worden direct meetblokken berekend, op hetzelfde 2-uursraster als de live metingen, zodat een kamer niet op 0 % begint. Periodes waarin de openhaard actief was (historie van `binary_sensor` *Openhaard actief*) worden overgeslagen.
+
+**Model status.** (1) *Data verzamelen* tot er een dag aan meetpunten is en de confidence ≥ 20 % is, (2) *Kamer leren* tot 50 %, (3) *Voorspellend regelen*: vanaf daar gebruikt Optimum Start het geleerde model in plaats van de veilige fallback.
 
 **Optimum Start.** Met "op temperatuur om" (bijv. 07:00) en Optimum Start aan berekent HA Climate elke minuut hoe lang het opwarmen duurt van de huidige binnentemperatuur naar de dagtemperatuur, rekening houdend met de buitentemperatuur (oplossing van bovenstaande vergelijking), plus 15 minuten marge. Op dat moment eindigt de nachtverlaging. Zolang de betrouwbaarheid onder 50 % ligt, wordt een **veilige fallback** gebruikt: 0,5 °C per uur, of het model als dat een vroegere start geeft. De voorverwarmtijd is begrensd op 6 uur en na het herstel wordt in dezelfde nacht niet opnieuw verlaagd. De status wordt persistent opgeslagen, zodat een herstart van Home Assistant niets verstoort. Uitschakelen van een schakelaar, verwijderen van een ruimte of van de integratie herstelt de lussen direct.
 

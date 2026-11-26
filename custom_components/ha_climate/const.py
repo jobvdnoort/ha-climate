@@ -13,6 +13,7 @@ CONF_OUTDOOR_SENSOR: Final = "outdoor_sensor"
 CONF_GAS_SENSOR: Final = "gas_sensor"
 CONF_GAS_PRICE: Final = "gas_price"
 CONF_GAS_PRICE_ENTITY: Final = "gas_price_entity"
+CONF_GAS_FIXED_COSTS: Final = "gas_fixed_costs"
 CONF_HEATING_LIMIT: Final = "heating_limit"
 CONF_BASELINE_DAYS: Final = "baseline_days"
 
@@ -37,7 +38,8 @@ CONF_FIREPLACE_THRESHOLD: Final = "fireplace_threshold"
 
 # --- Defaults ---------------------------------------------------------------
 DEFAULT_HEATING_LIMIT: Final = 18.0
-DEFAULT_BASELINE_DAYS: Final = 365
+# 0 = use all history since both sensors have data.
+DEFAULT_BASELINE_DAYS: Final = 0
 DEFAULT_NIGHT_START: Final = "22:00:00"
 DEFAULT_NIGHT_END: Final = "06:30:00"
 DEFAULT_NIGHT_OFFSET: Final = -2.0
@@ -63,6 +65,7 @@ BASELINE_MIN_DAYS: Final = 7
 # --- Storage ----------------------------------------------------------------
 STORAGE_VERSION: Final = 1
 STORAGE_KEY: Final = f"{DOMAIN}.storage"
+HISTORY_STORAGE_KEY: Final = f"{DOMAIN}.history"
 # Number of days kept in the persisted day-based history.
 HISTORY_RETENTION_DAYS: Final = 800
 
