@@ -96,6 +96,9 @@ class HaClimatePanel extends HTMLElement {
     this._busy = false;
     this._dirty = false;
     this._chartUnit = "m3";
+    this._pendingTemp = {};
+    this._pendingAirco = {};
+    this._tempTimers = {};
   }
 
   /* ---------- Home Assistant properties ---------- */
@@ -223,8 +226,17 @@ class HaClimatePanel extends HTMLElement {
   /* ---------- Rendering ---------- */
   _render() {
     const root = this.shadowRoot;
-    root.innerHTML = `
-      <style>${STYLE}</style>
+    if (!root.getElementById("app")) {
+      // Toast and busy bar live outside the re-rendered part, so a message
+      // shown right before a refresh stays visible.
+      root.innerHTML = `
+        <style>${STYLE}</style>
+        <div id="app"></div>
+        <div class="toast" id="toast" role="status" aria-live="polite"></div>
+        <div class="busy"><div class="spinner"></div></div>`;
+    }
+    root.querySelector(".busy").classList.toggle("show", this._busy);
+    root.getElementById("app").innerHTML = `
       <div class="toolbar">
         <ha-menu-button></ha-menu-button>
         <div class="title">HA Climate</div>
@@ -241,8 +253,6 @@ class HaClimatePanel extends HTMLElement {
       </nav>
       <main class="content">${this._renderContent()}</main>
       ${this._dialog ? this._renderDialog() : ""}
-      <div class="toast" id="toast"></div>
-      <div class="busy ${this._busy ? "show" : ""}"><div class="spinner"></div></div>
     `;
     const menu = root.querySelector("ha-menu-button");
     if (menu) {
@@ -307,12 +317,20 @@ class HaClimatePanel extends HTMLElement {
           </div>
           <div class="temps">
             <div><div class="big">${fmt(room.current_temperature, 1)}<small>°C</small></div><div class="muted">huidig</div></div>
-            <div><div class="mid">${fmt(room.target_temperature, 1)}<small>°C</small></div><div class="muted">doel nu</div></div>
+            <div class="setpoint" data-room-setpoint="${room.id}">
+              <div class="mid"><span class="sp-value">${fmt(this._pendingTemp[room.id] ?? room.target_temperature, 1)}</span><small>°C</small></div>
+              <div class="muted"><span class="sp-label">doel nu</span></div>
+              ${admin ? `<div class="stepper">
+                <button class="step-btn" data-action="room-temp" data-room="${room.id}" data-delta="-0.5" aria-label="Doeltemperatuur lager">−</button>
+                <button class="step-btn" data-action="room-temp" data-room="${room.id}" data-delta="0.5" aria-label="Doeltemperatuur hoger">+</button>
+              </div>` : ""}
+            </div>
             <div><div class="mid">${fmt(room.comfort_temperature, 1)}<small>°C</small></div><div class="muted">dag</div></div>
           </div>
           <div class="row small"><span>Nacht</span><span>${room.schedule.night_start} – ${room.schedule.optimum_start ? room.schedule.comfort_time : room.schedule.night_end},
             ${room.schedule.night_temp !== null ? fmt(room.schedule.night_temp, 1, "°C") : fmt(room.schedule.night_offset, 1, "°C")}</span></div>
           ${preheat}
+          ${room.aircos && room.aircos.length ? this._renderAirco(room, admin) : ""}
           <div class="row small"><span>Model</span><span>${this._confidenceBar(room.model.confidence)}</span></div>
           <details><summary>${room.loops.length} lus${room.loops.length === 1 ? "" : "sen"}</summary><ul class="loops">${loops}</ul></details>
           ${admin ? `<div class="actions">
@@ -353,6 +371,30 @@ class HaClimatePanel extends HTMLElement {
     `;
   }
 
+  _renderAirco(room, admin) {
+    const MODES = { off: "Uit", cool: "Koelen", heat: "Verwarmen", heat_cool: "Auto", auto: "Auto", dry: "Drogen", fan_only: "Ventilator" };
+    const ACTIONS = { cooling: "koelt", heating: "verwarmt", idle: "inactief", off: "uit", drying: "droogt", fan: "ventileert" };
+    const list = room.aircos
+      .map((a) => {
+        if (!a.available) return `<div class="airco-line muted">${esc(a.name || a.entity_id)}: niet beschikbaar</div>`;
+        const action = a.hvac_action ? ACTIONS[a.hvac_action] || a.hvac_action : "";
+        return `<div class="airco-line"><span>${esc(a.name || a.entity_id)}</span>
+          <span class="muted">${MODES[a.hvac_mode] || esc(a.hvac_mode)}${action ? ` · ${action}` : ""} · ${fmt(a.current_temperature, 1, "°C")} → ${fmt(this._pendingAirco[room.id] ?? a.target_temperature, 1, "°C")}</span></div>`;
+      })
+      .join("");
+    const mode = room.aircos.find((a) => a.available)?.hvac_mode;
+    const btn = (m, label) => `<button class="seg ${mode === (m === "boost" ? "heat" : m) ? "active" : ""}" data-action="airco-mode" data-room="${room.id}" data-mode="${m}" ${admin ? "" : "disabled"}>${label}</button>`;
+    return `<div class="airco">
+      <div class="airco-head"><span class="airco-title">❄ Airco ${room.airco_active ? '<span class="chip" style="--chip:#29b6f6">actief · niet in model</span>' : ""}</span>
+        ${admin ? `<span class="stepper">
+          <button class="step-btn" data-action="airco-temp" data-room="${room.id}" data-delta="-0.5" aria-label="Airco lager">−</button>
+          <button class="step-btn" data-action="airco-temp" data-room="${room.id}" data-delta="0.5" aria-label="Airco hoger">+</button></span>` : ""}
+      </div>
+      ${list}
+      <div class="segmented small airco-modes">${btn("off", "Uit")}${btn("cool", "Koelen")}${btn("boost", "Boost")}</div>
+    </div>`;
+  }
+
   _confidenceBar(value) {
     const v = Math.max(0, Math.min(100, value || 0));
     const color = v >= 70 ? "#43a047" : v >= 40 ? "#ffa726" : "#e53935";
@@ -364,8 +406,9 @@ class HaClimatePanel extends HTMLElement {
     const d = this._dialog;
     const room = d.room || { name: "", climates: [] };
     const usedElsewhere = new Set(
-      this._state.rooms.filter((r) => r.id !== room.id).flatMap((r) => r.climates)
+      this._state.rooms.filter((r) => r.id !== room.id).flatMap((r) => [...r.climates, ...(r.config.aircos || [])])
     );
+    const roomAircos = d.aircos || room.config?.aircos || [];
     const climates = this._entities((s) => s.entity_id.startsWith("climate."));
     const list = climates
       .map((c) => {
@@ -384,6 +427,16 @@ class HaClimatePanel extends HTMLElement {
           <label class="field"><span>Vloerverwarmingslussen</span>
             <input id="climate-filter" type="search" placeholder="Zoeken…"></label>
           <div class="checklist" id="climate-list">${list || '<p class="muted">Geen climate-entiteiten gevonden.</p>'}</div>
+          <label class="field"><span>Airco's (koelen / snel bijverwarmen) – optioneel</span></label>
+          <div class="checklist short" id="airco-list">${climates
+            .map((c) => {
+              const used = usedElsewhere.has(c.id);
+              return `<label class="check ${used ? "disabled" : ""}" data-name="${esc(c.name.toLowerCase())} ${esc(c.id)}">
+                <input type="checkbox" name="airco" value="${esc(c.id)}" ${roomAircos.includes(c.id) ? "checked" : ""} ${used ? "disabled" : ""}>
+                <span>${esc(c.name)}<br><small class="muted">${esc(c.id)}${used ? " · in andere kamer" : ""}</small></span></label>`;
+            })
+            .join("")}</div>
+          <p class="muted small">Airco's doen niet mee met nachtverlaging, schema's of optimum start. Als een airco verwarmt of koelt, wordt die periode uitgesloten van het vloerverwarmingsmodel.</p>
           <p class="muted small">De schema's (dag-/nachttemperatuur, tijden, optimum start) stel je in op het tabblad Schema's.</p>
           <div class="actions">
             <button class="btn text" data-action="close-dialog">Annuleren</button>
@@ -422,7 +475,7 @@ class HaClimatePanel extends HTMLElement {
     return `
       <div class="summary">
         <div class="card stat"><div class="muted">Baseline</div><div class="big">${fmt(b.m3_per_degree_day, 3)}<small>m³/gd</small></div>
-          <div class="muted small">${b.days_used} dagen${b.first_day ? ` vanaf ${baselineFrom}` : ""}${b.reliable ? "" : " · nog onbetrouwbaar"}</div></div>
+          <div class="muted small">${b.frozen ? `❄ bevroren op ${fmt(b.frozen.m3_per_degree_day, 3)} · ` : ""}${b.days_used} dagen${b.first_day ? ` vanaf ${baselineFrom}` : ""}${b.reliable ? "" : " · nog onbetrouwbaar"}</div></div>
         ${costTile("Gaskosten vandaag", e.cost_today, e.gas_today, 1)}
         ${costTile("Gaskosten gisteren", e.cost_yesterday, e.gas_yesterday, 1)}
         <div class="card stat"><div class="muted">Gaskosten periode (${this._days} d)</div><div class="big">${rows.length ? euro(periodCost) : "–"}</div>
@@ -439,13 +492,16 @@ class HaClimatePanel extends HTMLElement {
           <div class="muted small">${esc(e.gas_price_source || "")}${fixed ? ` · vast ${euro(fixed)}/dag` : ""}</div></div>
       </div>
       <div class="bar"><div class="segmented">${periods}</div><div class="spacer"></div>
+        <button class="btn text" data-action="export">⬇ Exporteer CSV</button>
         ${this._admin ? '<button class="btn text" data-action="recalculate">Baseline herberekenen</button>' : ""}</div>
+      <div class="card">${this._renderFreeze()}</div>
       <div class="card">
         <h3>Graaddagen vs. gasverbruik per dag</h3>
         <div class="legend">
           <span><i style="background:${COLORS.gas}"></i>Werkelijk gas (m³)</span>
           <span><i class="line" style="background:${COLORS.expected}"></i>Verwacht gas (m³)</span>
           <span><i class="line" style="background:${COLORS.degreeDays}"></i>Graaddagen</span>
+          <span><i class="event-key"></i>Wijziging (nachtverlaging, baseline)</span>
         </div>
         <div class="chart" id="chart-gas"></div>
         <p class="muted small">
@@ -463,9 +519,31 @@ class HaClimatePanel extends HTMLElement {
             <button class="seg ${this._chartUnit === "eur" ? "active" : ""}" data-action="unit" data-unit="eur">€</button>
           </div></div>
         <div class="chart" id="chart-savings"></div>
-        <p class="muted small">Besparing = verwacht (baseline × graaddagen) − werkelijk, opgeteld over de gekozen periode en omgerekend met de variabele gasprijs (vaste leveringskosten tellen niet mee). Dagen met nachtverlaging zijn gemarkeerd.</p>
+        <p class="muted small">${b.savings_start ? `Cumulatief vanaf de startdatum ${dateLabel(b.savings_start)} (begint op 0). ` : ""}${b.frozen ? `Vergeleken met de bevroren baseline van ${fmt(b.frozen.m3_per_degree_day, 3)} m³/graaddag. ` : ""}Besparing = verwacht (baseline × graaddagen) − werkelijk, opgeteld over de gekozen periode en omgerekend met de variabele gasprijs (vaste leveringskosten tellen niet mee). Dagen met nachtverlaging zijn gemarkeerd.</p>
       </div>
       ${this._renderModelSection()}`;
+  }
+
+  _renderRanking() {
+    const ranking = this._state.ranking || [];
+    if (!ranking.length) return "";
+    const color = { "Hoog warmteverlies": "#e53935", "Stookt veel": "#fb8c00", Gemiddeld: "#f9a825", Zuinig: "#43a047" };
+    const rows = ranking
+      .map(
+        (r) => `<tr>
+          <td class="rank">${r.rank}</td>
+          <td><b>${esc(r.name)}</b><br><span class="chip" style="--chip:${color[r.label] || "#9e9e9e"}">${esc(r.label)}</span>
+            ${r.tags.filter((t) => t.toLowerCase() !== r.label.toLowerCase()).map((t) => `<span class="muted small"> · ${esc(t)}</span>`).join("")}</td>
+          <td>${r.heat_loss !== null ? `${fmt(r.heat_loss, 4)}<br><small class="muted">°C/u per °C ΔT</small>` : "–"}</td>
+          <td>${r.duty !== null ? `${fmt(r.duty * 100, 0)}%<br><small class="muted">${r.windows} blokken, ${r.days} d</small>` : `–<br><small class="muted">geen meetblokken in ${r.days} d</small>`}</td>
+          <td>${r.score !== null ? `<span class="conf-bar wide"><span style="width:${Math.round(r.score * 100)}%;background:${color[r.label] || "#9e9e9e"}"></span></span>` : ""}</td>
+        </tr>`
+      )
+      .join("");
+    return `<div class="table-wrap"><table class="ranking">
+      <thead><tr><th>#</th><th>Kamer</th><th>Warmteverlies</th><th>Stookpercentage</th><th>Energiescore</th></tr></thead>
+      <tbody>${rows}</tbody></table></div>
+      <p class="muted small">Warmteverlies = geleerde afkoelcoëfficiënt (°C/uur per °C verschil met buiten). Stookpercentage = deel van de tijd dat de vloerverwarming actief verwarmde in de afgelopen ${ranking[0].days} dagen. De energiescore combineert beide, relatief tot de slechtste kamer.</p>`;
   }
 
   _renderModelSection() {
@@ -539,7 +617,8 @@ class HaClimatePanel extends HTMLElement {
           </p>
           ${this._admin ? `<div class="actions"><button class="btn text small danger" data-action="reset-model" data-room="${room.id}">Model resetten</button></div>` : ""}
         </div>
-        <h3 class="sub">Vergelijking kamers</h3>
+        <h3 class="sub">Vergelijking kamers – van minst naar meest zuinig</h3>
+        ${this._renderRanking()}
         <div class="chart" id="chart-rooms"></div>
       </div>`;
   }
@@ -567,7 +646,11 @@ class HaClimatePanel extends HTMLElement {
           { name: "Verwacht gas", type: "line", axis: "left", color: COLORS.expected, values: rows.map((r) => r.expected), unit: "m³", digits: 2 },
           { name: "Graaddagen", type: "line", axis: "right", color: COLORS.degreeDays, values: rows.map((r) => r.degree_days), unit: "gd", digits: 1, dashed: true },
           { name: "Gaskosten", type: "tooltip", axis: "left", color: COLORS.cost, values: rows.map((r) => r.cost), unit: "€" },
+          { name: "Buiten gem.", type: "tooltip", axis: "left", color: "#78909c", values: rows.map((r) => r.mean_temperature), unit: "°C" },
+          { name: "Binnen gemeten", type: "tooltip", axis: "left", color: "#ef6c00", values: rows.map((r) => r.indoor_temperature), unit: "°C" },
+          { name: "Binnen doel", type: "tooltip", axis: "left", color: "#8e24aa", values: rows.map((r) => r.indoor_target), unit: "°C" },
         ],
+        events: rows.map((r) => r.events || []),
       });
       const savEl = root.getElementById("chart-savings");
       const eur = this._chartUnit === "eur";
@@ -575,6 +658,7 @@ class HaClimatePanel extends HTMLElement {
         width: savEl.clientWidth || 700,
         labels,
         shade: rows.map((r) => r.setback),
+        events: rows.map((r) => r.events || []),
         series: [
           {
             name: eur ? "Cumulatief (€)" : "Cumulatief (m³)",
@@ -659,6 +743,24 @@ class HaClimatePanel extends HTMLElement {
       vroegere start gebruikt (0,5 °C per uur).</p><div class="grid wide">${cards}</div>`;
   }
 
+  _renderFreeze(inSettings = false) {
+    const b = this._state.baseline;
+    const frozen = b.frozen;
+    const admin = this._admin;
+    const quick = inSettings
+      ? ""
+      : `<label class="field inline-field"><span>Startdatum besparing</span><input name="savings_start_quick" type="date" value="${esc(b.savings_start || "")}" ${admin ? "" : "disabled"}></label>`;
+    return `<div class="freeze ${frozen ? "is-frozen" : ""}">
+      <div><b>${frozen ? "❄ Baseline bevroren" : "Baseline volgt de historie"}</b><br>
+        <span class="muted small">${frozen
+          ? `${fmt(frozen.m3_per_degree_day, 3)} m³/graaddag sinds ${dateLabel(frozen.frozen_at)} (${frozen.days_used} dagen${frozen.first_day ? ` vanaf ${dateLabel(frozen.first_day)}` : ""}). De besparing wordt hiertegen gemeten.`
+          : "Bevries de baseline voordat je nachtverlaging aanzet, zodat de besparing steeds tegen hetzelfde referentieverbruik wordt gemeten."}
+          Besparing telt vanaf <b>${dateLabel(b.measurement_start)}</b>.</span></div>
+      ${quick}
+      ${admin ? `<button class="btn ${frozen ? "text" : ""}" type="button" data-action="freeze" data-freeze="${frozen ? 0 : 1}">${frozen ? "Ontdooien" : "Baseline bevriezen"}</button>` : ""}
+    </div>`;
+  }
+
   /* ----- Settings ----- */
   _renderSettings() {
     const st = this._state.settings;
@@ -681,10 +783,22 @@ class HaClimatePanel extends HTMLElement {
         <div class="form-grid">
           <label class="field"><span>Vaste gasprijs (€/m³)</span><input name="gas_price" type="number" step="0.0001" min="0" max="10" value="${st.gas_price ?? ""}" placeholder="standaard ${fmt(this._state.defaults.gas_price, 2)}" ${dis}></label>
           <label class="field"><span>Of: gasprijs-entiteit</span><select name="gas_price_entity" ${dis}>${this._options(prices, st.gas_price_entity, true)}</select></label>
-          <label class="field"><span>Vaste leveringskosten (€/dag)</span><input name="gas_fixed_costs" type="number" step="0.0001" min="0" max="10" value="${st.gas_fixed_costs ?? 0}" placeholder="0,00" ${dis}></label>
+          <label class="field"><span>Vaste leveringskosten</span><input name="gas_fixed_costs" type="number" step="0.01" min="0" max="500" value="${st.gas_fixed_costs ?? 0}" placeholder="0,00" ${dis}></label>
+          <label class="field"><span>Per</span><select name="gas_fixed_costs_unit" ${dis}>
+            <option value="month" ${st.gas_fixed_costs_unit !== "day" ? "selected" : ""}>maand (€/maand)</option>
+            <option value="day" ${st.gas_fixed_costs_unit === "day" ? "selected" : ""}>dag (€/dag)</option></select></label>
         </div>
         <p class="muted small">Een entiteit gaat voor op de vaste prijs. Zonder prijs wordt ${euro(this._state.defaults.gas_price)} per m³ gebruikt.
-          Vaste leveringskosten (vastrecht, netbeheer) tellen mee in de totale gaskosten, niet in de besparing.</p>
+          Vaste leveringskosten (vastrecht, netbeheer) tellen mee in de totale gaskosten, niet in de besparing.
+          ${st.gas_fixed_costs ? `Dat is ${euro(st.gas_fixed_costs_unit === "day" ? st.gas_fixed_costs : st.gas_fixed_costs / 30.4375)} per dag
+          (${euro(st.gas_fixed_costs_unit === "day" ? st.gas_fixed_costs * 30.4375 : st.gas_fixed_costs)} per maand).` : ""}</p>
+        <h3>Besparingsmeting</h3>
+        <div class="form-grid">
+          <label class="field"><span>Startdatum besparing</span><input name="savings_start" type="date" value="${esc(st.savings_start || "")}" ${dis}></label>
+        </div>
+        <label class="check inline"><input type="checkbox" name="degree_day_indoor_correction" ${st.degree_day_indoor_correction ? "checked" : ""} ${dis}>
+          <span>Graaddagen corrigeren voor de gemiddelde ingestelde binnentemperatuur (stookgrens + (doel − 20 °C))</span></label>
+        ${this._renderFreeze(true)}
         <h3>Nachtverlaging (algemeen)</h3>
         <div class="form-grid">
           <label class="field"><span>Start</span><input name="night_start" type="time" value="${hhmm(st.night_start)}" ${dis}></label>
@@ -744,7 +858,7 @@ class HaClimatePanel extends HTMLElement {
     const filter = root.getElementById("climate-filter");
     filter?.addEventListener("input", () => {
       const q = filter.value.toLowerCase();
-      root.querySelectorAll("#climate-list .check").forEach((el) => {
+      root.querySelectorAll("#climate-list .check, #airco-list .check").forEach((el) => {
         el.style.display = el.dataset.name.includes(q) ? "" : "none";
       });
     });
@@ -818,6 +932,32 @@ class HaClimatePanel extends HTMLElement {
         this.shadowRoot.querySelectorAll('[data-action="unit"]').forEach((b) => b.classList.toggle("active", b === el));
         this._renderCharts();
         break;
+      case "room-temp":
+        this._stepRoomTemp(el.dataset.room, Number(el.dataset.delta));
+        break;
+      case "airco-temp":
+        this._stepAircoTemp(el.dataset.room, Number(el.dataset.delta));
+        break;
+      case "airco-mode": {
+        const labels = { off: "Airco uit", cool: "Airco koelt", boost: "Airco: snel bijverwarmen" };
+        await this._call({ type: "ha_climate/airco", room_id: el.dataset.room, mode: el.dataset.mode }, labels[el.dataset.mode]);
+        break;
+      }
+      case "freeze": {
+        const freeze = el.dataset.freeze === "1";
+        const start = this.shadowRoot.querySelector('[name="savings_start_quick"]')?.value;
+        const msg = { type: "ha_climate/baseline/freeze", freeze };
+        if (start !== undefined) msg.savings_start = start || null;
+        await this._call(msg, freeze ? "Baseline bevroren" : "Baseline niet meer bevroren");
+        if (this._tab === "analytics") {
+          await this._loadHistory();
+          this._render();
+        }
+        break;
+      }
+      case "export":
+        await this._exportCsv();
+        break;
       case "room-select":
         this._room = el.value;
         this._render();
@@ -840,11 +980,103 @@ class HaClimatePanel extends HTMLElement {
     }
   }
 
+  /* Optimistic setpoint changes: update the number immediately, send after a short pause. */
+  _stepRoomTemp(roomId, delta) {
+    const room = this._state.rooms.find((r) => r.id === roomId);
+    if (!room) return;
+    const base = this._pendingTemp[roomId] ?? room.target_temperature ?? room.comfort_temperature ?? 20;
+    const next = Math.min(30, Math.max(5, Math.round((base + delta) * 2) / 2));
+    this._pendingTemp[roomId] = next;
+    const box = this.shadowRoot.querySelector(`[data-room-setpoint="${roomId}"]`);
+    if (box) {
+      box.querySelector(".sp-value").textContent = fmt(next, 1);
+      box.querySelector(".sp-label").textContent = "instellen…";
+      box.classList.add("pending");
+    }
+    clearTimeout(this._tempTimers[roomId]);
+    this._tempTimers[roomId] = setTimeout(async () => {
+      try {
+        const res = await this._ws({ type: "ha_climate/room/set_temperature", room_id: roomId, temperature: next });
+        this._toast(`${room.name}: ${fmt(next, 1)} °C op ${res.entities.length} lus${res.entities.length === 1 ? "" : "sen"}`);
+      } catch (err) {
+        this._toast(err?.message || "Instellen mislukt", true);
+      }
+      delete this._pendingTemp[roomId];
+      await this._refresh();
+    }, 700);
+  }
+
+  _stepAircoTemp(roomId, delta) {
+    const room = this._state.rooms.find((r) => r.id === roomId);
+    const airco = room?.aircos.find((a) => a.available);
+    if (!airco) return;
+    const base = this._pendingAirco[roomId] ?? airco.target_temperature ?? 21;
+    const next = Math.min(32, Math.max(10, Math.round((base + delta) * 2) / 2));
+    this._pendingAirco[roomId] = next;
+    this._render();
+    clearTimeout(this._tempTimers[`a-${roomId}`]);
+    this._tempTimers[`a-${roomId}`] = setTimeout(async () => {
+      try {
+        await this._ws({ type: "ha_climate/airco", room_id: roomId, temperature: next });
+        this._toast(`Airco ${room.name}: ${fmt(next, 1)} °C`);
+      } catch (err) {
+        this._toast(err?.message || "Instellen mislukt", true);
+      }
+      delete this._pendingAirco[roomId];
+      await this._refresh();
+    }, 700);
+  }
+
+  async _exportCsv() {
+    let result;
+    try {
+      result = await this._ws({ type: "ha_climate/export" });
+    } catch (err) {
+      this._toast(err?.message || "Export mislukt", true);
+      return;
+    }
+    const num = (v, d) => (v === null || v === undefined || Number.isNaN(v) ? "" : Number(v).toFixed(d));
+    const cell = (v) => {
+      const text = String(v ?? "");
+      return /[",\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
+    };
+    const header = [
+      "datum", "buiten_temp_gem_c", "binnen_temp_gem_c", "binnen_doel_gem_c", "stookgrens_c", "graaddagen",
+      "gas_werkelijk_m3", "gas_verwacht_m3", "besparing_m3", "besparing_eur", "variabele_kosten_eur",
+      "vaste_kosten_eur", "totale_kosten_eur", "openhaard_minuten", "nachtverlaging", "gedeeltelijke_dag", "gebeurtenissen",
+    ];
+    const lines = [header.join(",")];
+    for (const r of result.days) {
+      lines.push([
+        r.date, num(r.mean_temperature, 2), num(r.indoor_temperature, 2), num(r.indoor_target, 2), num(r.heating_limit, 2),
+        num(r.degree_days, 2), num(r.gas, 3), num(r.expected, 3), num(r.saved, 3), num(r.saved_eur, 2),
+        num(r.cost_variable, 2), num(r.cost_fixed, 2), num(r.cost, 2), r.fireplace_minutes ?? 0,
+        r.setback ? "ja" : "nee", r.partial ? "ja" : "nee",
+        (r.events || []).map((e) => `${timeOf(e.time)} ${e.text}`).join(" | "),
+      ].map(cell).join(","));
+    }
+    const blob = new Blob(["\ufeff" + lines.join("\r\n") + "\r\n"], { type: "text/csv;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `ha-climate-${new Date().toISOString().slice(0, 10)}.csv`;
+    this.shadowRoot.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 5000);
+    this._toast(`${result.days.length} dagen geëxporteerd`);
+  }
+
   async _saveRoom() {
     const root = this.shadowRoot;
     const name = root.getElementById("room-name").value.trim();
     const climates = [...root.querySelectorAll('#climate-list input[name="climate"]:checked')].map((i) => i.value);
-    const room = { name, climates };
+    const aircos = [...root.querySelectorAll('#airco-list input[name="airco"]:checked')].map((i) => i.value);
+    if (aircos.some((a) => climates.includes(a))) {
+      this._toast("Een entiteit kan niet tegelijk lus en airco zijn", true);
+      return;
+    }
+    const room = { name, climates, aircos };
     if (this._dialog.room?.id) room.id = this._dialog.room.id;
     const result = await this._call({ type: "ha_climate/room/save", room }, room.id ? "Kamer opgeslagen" : "Kamer toegevoegd");
     if (result) {
@@ -888,6 +1120,9 @@ class HaClimatePanel extends HTMLElement {
       gas_price: numOrNull(get("gas_price")),
       gas_price_entity: get("gas_price_entity") || null,
       gas_fixed_costs: numOrNull(get("gas_fixed_costs")) ?? 0,
+      gas_fixed_costs_unit: get("gas_fixed_costs_unit"),
+      savings_start: get("savings_start") || null,
+      degree_day_indoor_correction: form.querySelector('[name="degree_day_indoor_correction"]').checked,
       night_start: get("night_start"),
       night_end: get("night_end"),
       night_offset: numOrNull(get("night_offset")),
@@ -922,9 +1157,9 @@ function niceMax(value) {
   return nice * exp;
 }
 
-function chart({ width, labels, series, marks = [], shade = [] }) {
+function chart({ width, labels, series, marks = [], shade = [], events = [] }) {
   const height = 260;
-  const pad = { top: 16, right: series.some((s) => s.axis === "right") ? 44 : 14, bottom: 34, left: 48 };
+  const pad = { top: events.some((e) => e && e.length) ? 22 : 16, right: series.some((s) => s.axis === "right") ? 44 : 14, bottom: 34, left: 48 };
   const w = Math.max(280, width);
   const innerW = w - pad.left - pad.right;
   const innerH = height - pad.top - pad.bottom;
@@ -985,6 +1220,13 @@ function chart({ width, labels, series, marks = [], shade = [] }) {
     }
     if (marks[i]) svg += `<text x="${x(i)}" y="${pad.top + 10}" text-anchor="middle" font-size="10">${marks[i]}</text>`;
   });
+  // change markers (night setback on/off, settings, baseline frozen)
+  events.forEach((list, i) => {
+    if (!list || !list.length) return;
+    const ex = x(i);
+    svg += `<line x1="${ex}" x2="${ex}" y1="${pad.top}" y2="${pad.top + innerH}" class="event-line"/>`;
+    svg += `<g class="event-badge"><circle cx="${ex}" cy="${pad.top - 2}" r="7"/><text x="${ex}" y="${pad.top + 1.5}" text-anchor="middle">${list.length > 1 ? list.length : "!"}</text></g>`;
+  });
   // series
   const bars = series.filter((s) => s.type === "bar");
   const barW = Math.max(1, (step * 0.7) / Math.max(1, bars.length));
@@ -1024,9 +1266,13 @@ function chart({ width, labels, series, marks = [], shade = [] }) {
   // hover targets
   labels.forEach((label, i) => {
     const lines = series
+      .filter((s) => s.values[i] !== null && s.values[i] !== undefined)
       .map((s) => `<div><i style="background:${s.color}"></i>${esc(s.name)}: <b>${s.unit === "€" ? euro(s.values[i]) : fmt(s.values[i], s.digits ?? 1, s.unit)}</b></div>`)
       .join("");
-    const tip = `<div class="tip-title">${esc(label)}${marks[i] ? " " + marks[i] : ""}${shade[i] ? " · nachtverlaging" : ""}</div>${lines}`;
+    const evs = (events[i] || [])
+      .map((e) => `<div class="tip-event">⚑ ${timeOf(e.time)} ${esc(e.text)}</div>`)
+      .join("");
+    const tip = `<div class="tip-title">${esc(label)}${marks[i] ? " " + marks[i] : ""}${shade[i] ? " · nachtverlaging" : ""}</div>${lines}${evs}`;
     svg += `<rect x="${pad.left + step * i}" y="${pad.top}" width="${step}" height="${innerH}" fill="transparent" data-tip="${esc(tip)}"/>`;
   });
   svg += "</svg>";
@@ -1193,6 +1439,31 @@ const STYLE = `
   .tip-title { font-weight: 500; margin-bottom: 4px; }
   .table-wrap { overflow-x: auto; margin-top: 8px; }
   .room-select { width: auto; min-width: 180px; }
+  .setpoint { position: relative; }
+  .setpoint.pending .sp-value { color: var(--accent); }
+  .stepper { display: inline-flex; gap: 6px; margin-top: 4px; }
+  .step-btn { width: 30px; height: 30px; border-radius: 50%; border: 1px solid var(--border); background: var(--card);
+    color: var(--primary-text-color); font-size: 18px; line-height: 1; cursor: pointer; font-family: inherit; }
+  .step-btn:hover { border-color: var(--accent); color: var(--accent); }
+  .step-btn:active { transform: scale(.92); }
+  .airco { border-top: 1px solid var(--border); padding: 8px 0 4px; font-size: 13px; }
+  .airco-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px; }
+  .airco-title { font-weight: 500; display: flex; gap: 6px; align-items: center; }
+  .airco-line { display: flex; justify-content: space-between; gap: 8px; padding: 2px 0; }
+  .airco-modes { margin-top: 6px; }
+  .checklist.short { max-height: 170px; }
+  .freeze { display: flex; gap: 16px; align-items: center; flex-wrap: wrap; justify-content: space-between; }
+  .freeze > div:first-child { flex: 1; min-width: 240px; line-height: 1.5; }
+  .freeze.is-frozen b { color: #29b6f6; }
+  .inline-field { min-width: 170px; }
+  .settings .freeze { margin-top: 12px; padding: 12px; border: 1px solid var(--border); border-radius: 8px; }
+  .chart .event-line { stroke: #ff7043; stroke-width: 1.5; stroke-dasharray: 3 3; }
+  .chart .event-badge circle { fill: #ff7043; }
+  .chart .event-badge text { fill: #fff; font-size: 9px; font-weight: 700; }
+  .legend .event-key { width: 10px; height: 10px; border-radius: 50%; background: #ff7043; }
+  .tip-event { margin-top: 4px; padding-top: 4px; border-top: 1px solid var(--border); color: #ff7043; }
+  table.ranking td.rank { font-size: 20px; font-weight: 300; width: 32px; }
+  .conf-bar.wide { width: 110px; }
   h3.sub { margin-top: 20px; font-size: 14px; color: var(--muted); }
   .model-status { border: 1px solid var(--border); border-radius: 10px; padding: 16px; margin-top: 8px; }
   .model-head { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 16px; margin-bottom: 16px; }
@@ -1213,7 +1484,7 @@ const STYLE = `
   .form-grid { display: grid; gap: 12px; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); margin: 8px 0; align-items: end; }
   .field { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--muted); }
   .field.hidden { display: none; }
-  input[type=text], input[type=number], input[type=time], input[type=search], select {
+  input[type=text], input[type=number], input[type=time], input[type=date], input[type=search], select {
     font: inherit; font-size: 14px; padding: 9px 10px; border-radius: 6px; border: 1px solid var(--border);
     background: var(--input-fill-color, var(--secondary-background-color, transparent)); color: var(--primary-text-color); width: 100%;
   }

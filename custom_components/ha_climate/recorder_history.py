@@ -13,6 +13,7 @@ from homeassistant.const import STATE_ON, STATE_UNAVAILABLE, STATE_UNKNOWN
 from homeassistant.core import HomeAssistant, State
 from homeassistant.util import dt as dt_util
 
+from .const import AIRCO_ACTIVE_ACTIONS
 from .thermal import Series, history_start, observations_from_history
 
 _LOGGER = logging.getLogger(__name__)
@@ -43,6 +44,29 @@ def _climate_series(states: list[State]) -> tuple[Series, Series]:
     return temps, actions
 
 
+def _airco_active(state: State) -> bool:
+    action = state.attributes.get(ATTR_HVAC_ACTION)
+    if action in AIRCO_ACTIVE_ACTIONS:
+        return True
+    return action is None and state.state not in ("off", STATE_UNAVAILABLE, STATE_UNKNOWN)
+
+
+def _airco_periods(states: list[State], end: datetime) -> list[tuple[datetime, datetime]]:
+    """Periods in which an airco was heating or cooling."""
+    periods = []
+    since = None
+    for state in states:
+        active = _airco_active(state)
+        if active and since is None:
+            since = state.last_updated
+        elif not active and since is not None:
+            periods.append((since, state.last_updated))
+            since = None
+    if since is not None:
+        periods.append((since, end))
+    return periods
+
+
 def _on_periods(states: list[State], end: datetime) -> list[tuple[datetime, datetime]]:
     periods = []
     since = None
@@ -62,6 +86,7 @@ async def async_backfill_observations(
     climates: list[str],
     outdoor_sensor: str,
     fireplace_entity: str | None = None,
+    aircos: list[str] | None = None,
 ) -> tuple[list, dict[str, Any]]:
     """Compute thermal observations from the recorder history of a room.
 
@@ -74,6 +99,7 @@ async def async_backfill_observations(
     entity_ids = [*climates, outdoor_sensor]
     if fireplace_entity:
         entity_ids.append(fireplace_entity)
+    entity_ids.extend(aircos or [])
 
     states: dict[str, list[State]] = await recorder.async_add_executor_job(
         partial(
@@ -112,6 +138,8 @@ async def async_backfill_observations(
     invalid = (
         _on_periods(states.get(fireplace_entity, []), end) if fireplace_entity else []
     )
+    for airco in aircos or []:
+        invalid.extend(_airco_periods(states.get(airco, []), end))
     observations = await hass.async_add_executor_job(
         observations_from_history, loops, outdoor, first, end, invalid
     )

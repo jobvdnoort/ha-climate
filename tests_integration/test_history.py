@@ -184,5 +184,5 @@ async def test_migration_baseline_days(hass, ha_climate_enabled) -> None:
     entry.add_to_hass(hass)
     assert await hass.config_entries.async_setup(entry.entry_id)
     await hass.async_block_till_done()
-    assert entry.minor_version == 2
+    assert entry.minor_version == 3
     assert entry.data["baseline_days"] == 0

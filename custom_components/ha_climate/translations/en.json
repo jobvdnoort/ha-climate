@@ -11,12 +11,15 @@
           "gas_price_entity": "Gas price entity (optional)",
           "heating_limit": "Heating limit",
           "baseline_days": "History used for baseline (days, 0 = all)",
-          "gas_fixed_costs": "Fixed delivery costs (€/day)"
+          "gas_fixed_costs": "Fixed delivery costs",
+          "gas_fixed_costs_unit": "Fixed costs unit",
+          "degree_day_indoor_correction": "Correct degree days for indoor temperature"
         },
         "data_description": {
           "heating_limit": "Degree days = max(0, heating limit − mean outdoor temperature). Default 18 °C.",
           "baseline_days": "0 = all days since both sensors have data.",
-          "gas_fixed_costs": "Optional, added to the total gas costs per day (not to the savings)."
+          "gas_fixed_costs": "Optional (standing charge, grid costs). A monthly amount is converted to daily costs (÷ 30.4375) and added to the total gas costs, not to the savings.",
+          "degree_day_indoor_correction": "Shifts the heating limit by the difference between the mean indoor target temperature and 20 °C."
         }
       },
       "night": {
@@ -38,7 +41,8 @@
       "name_exists": "A room with this name already exists.",
       "climates_required": "Select at least one floor heating loop.",
       "climate_in_use": "One of these loops is already assigned to another room.",
-      "night_above_day": "The night temperature must be lower than the day temperature."
+      "night_above_day": "The night temperature must be lower than the day temperature.",
+      "airco_in_use": "An air conditioner is already linked as a loop or to another room."
     },
     "abort": {
       "already_configured": "This gas sensor is already configured."
@@ -68,12 +72,15 @@
           "gas_price_entity": "Gas price entity (optional)",
           "heating_limit": "Heating limit",
           "baseline_days": "History used for baseline (days, 0 = all)",
-          "gas_fixed_costs": "Fixed delivery costs (€/day)"
+          "gas_fixed_costs": "Fixed delivery costs",
+          "gas_fixed_costs_unit": "Fixed costs unit",
+          "degree_day_indoor_correction": "Correct degree days for indoor temperature"
         },
         "data_description": {
           "heating_limit": "Degree days = max(0, heating limit − mean outdoor temperature). Default 18 °C.",
           "baseline_days": "0 = all days since both sensors have data.",
-          "gas_fixed_costs": "Optional, added to the total gas costs per day (not to the savings)."
+          "gas_fixed_costs": "Optional (standing charge, grid costs). A monthly amount is converted to daily costs (÷ 30.4375) and added to the total gas costs, not to the savings.",
+          "degree_day_indoor_correction": "Shifts the heating limit by the difference between the mean indoor target temperature and 20 °C."
         }
       },
       "night": {
@@ -101,12 +108,14 @@
           "day_temp": "Day temperature (optional)",
           "night_temp": "Fixed night temperature (optional)",
           "comfort_time": "At temperature by",
-          "optimum_start": "Optimum start"
+          "optimum_start": "Optimum start",
+          "aircos": "Air conditioners (cooling / quick heating)"
         },
         "data_description": {
           "use_global_night": "Turn off to use the times and setback below for this room.",
           "night_temp": "When set, this temperature is used at night instead of the relative setback.",
-          "optimum_start": "Start heating automatically based on the learned thermal model so the room reaches the day temperature at the set time."
+          "optimum_start": "Start heating automatically based on the learned thermal model so the room reaches the day temperature at the set time.",
+          "aircos": "Optional. Air conditioners are not part of the night setback, schedules or optimum start; periods in which one heats or cools are excluded from the floor heating model."
         }
       },
       "room": {
@@ -122,12 +131,14 @@
           "day_temp": "Day temperature (optional)",
           "night_temp": "Fixed night temperature (optional)",
           "comfort_time": "At temperature by",
-          "optimum_start": "Optimum start"
+          "optimum_start": "Optimum start",
+          "aircos": "Air conditioners (cooling / quick heating)"
         },
         "data_description": {
           "use_global_night": "Turn off to use the times and setback below for this room.",
           "night_temp": "When set, this temperature is used at night instead of the relative setback.",
-          "optimum_start": "Start heating automatically based on the learned thermal model so the room reaches the day temperature at the set time."
+          "optimum_start": "Start heating automatically based on the learned thermal model so the room reaches the day temperature at the set time.",
+          "aircos": "Optional. Air conditioners are not part of the night setback, schedules or optimum start; periods in which one heats or cools are excluded from the floor heating model."
         }
       },
       "edit_room": {
@@ -163,7 +174,8 @@
       "name_exists": "A room with this name already exists.",
       "climates_required": "Select at least one floor heating loop.",
       "climate_in_use": "One of these loops is already assigned to another room.",
-      "night_above_day": "The night temperature must be lower than the day temperature."
+      "night_above_day": "The night temperature must be lower than the day temperature.",
+      "airco_in_use": "An air conditioner is already linked as a loop or to another room."
     }
   },
   "entity": {
@@ -260,6 +272,14 @@
   "exceptions": {
     "no_entry": {
       "message": "No loaded HA Climate configuration found."
+    }
+  },
+  "selector": {
+    "fixed_costs_unit": {
+      "options": {
+        "month": "Per month (€/month)",
+        "day": "Per day (€/day)"
+      }
     }
   }
 }
