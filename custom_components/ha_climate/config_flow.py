@@ -25,7 +25,9 @@ from .const import (
     CONF_FIREPLACE_TEMP_SENSOR,
     CONF_FIREPLACE_THRESHOLD,
     CONF_GAS_PRICE,
+    CONF_DD_INDOOR_CORRECTION,
     CONF_GAS_FIXED_COSTS,
+    CONF_GAS_FIXED_COSTS_UNIT,
     CONF_GAS_PRICE_ENTITY,
     CONF_GAS_SENSOR,
     CONF_HEATING_LIMIT,
@@ -35,6 +37,7 @@ from .const import (
     CONF_NIGHT_TEMP,
     CONF_OPTIMUM_START,
     CONF_OUTDOOR_SENSOR,
+    CONF_ROOM_AIRCOS,
     CONF_ROOM_CLIMATES,
     CONF_ROOM_ID,
     CONF_ROOM_NAME,
@@ -43,6 +46,7 @@ from .const import (
     CONF_ROOMS,
     DEFAULT_BASELINE_DAYS,
     DEFAULT_COMFORT_TIME,
+    DEFAULT_FIXED_COSTS_UNIT,
     DEFAULT_FIREPLACE_THRESHOLD,
     DEFAULT_HEATING_LIMIT,
     DEFAULT_NIGHT_END,
@@ -86,7 +90,7 @@ def _general_schema(values: dict[str, Any]) -> vol.Schema:
             ): selector.NumberSelector(
                 selector.NumberSelectorConfig(
                     min=0,
-                    max=10,
+                    max=500,
                     step="any",
                     unit_of_measurement="€/m³",
                     mode=selector.NumberSelectorMode.BOX,
@@ -104,10 +108,23 @@ def _general_schema(values: dict[str, Any]) -> vol.Schema:
                     min=0,
                     max=10,
                     step="any",
-                    unit_of_measurement="€/dag",
                     mode=selector.NumberSelectorMode.BOX,
                 )
             ),
+            vol.Required(
+                CONF_GAS_FIXED_COSTS_UNIT,
+                default=values.get(CONF_GAS_FIXED_COSTS_UNIT) or DEFAULT_FIXED_COSTS_UNIT,
+            ): selector.SelectSelector(
+                selector.SelectSelectorConfig(
+                    options=["month", "day"],
+                    translation_key="fixed_costs_unit",
+                    mode=selector.SelectSelectorMode.LIST,
+                )
+            ),
+            vol.Required(
+                CONF_DD_INDOOR_CORRECTION,
+                default=values.get(CONF_DD_INDOOR_CORRECTION, False),
+            ): selector.BooleanSelector(),
             vol.Required(
                 CONF_HEATING_LIMIT,
                 default=values.get(CONF_HEATING_LIMIT, DEFAULT_HEATING_LIMIT),
@@ -171,6 +188,11 @@ def _room_schema(values: dict[str, Any], defaults: dict[str, Any]) -> vol.Schema
             ): selector.TextSelector(),
             vol.Required(
                 CONF_ROOM_CLIMATES, default=values.get(CONF_ROOM_CLIMATES, vol.UNDEFINED)
+            ): selector.EntitySelector(
+                selector.EntitySelectorConfig(domain="climate", multiple=True)
+            ),
+            vol.Optional(
+                CONF_ROOM_AIRCOS, description=_suggest(values, CONF_ROOM_AIRCOS)
             ): selector.EntitySelector(
                 selector.EntitySelectorConfig(domain="climate", multiple=True)
             ),
@@ -254,7 +276,7 @@ class HaClimateConfigFlow(ConfigFlow, domain=DOMAIN):
     """Handle the initial configuration."""
 
     VERSION = 1
-    MINOR_VERSION = 2
+    MINOR_VERSION = 3
 
     def __init__(self) -> None:
         """Initialize the flow."""
@@ -392,7 +414,9 @@ class HaClimateOptionsFlow(OptionsFlow):
         if user_input is not None:
             errors = self._validate_room(user_input, self._room_id)
             if not errors:
-                room.update({CONF_DAY_TEMP: None, CONF_NIGHT_TEMP: None, **user_input})
+                room.update(
+                    {CONF_DAY_TEMP: None, CONF_NIGHT_TEMP: None, CONF_ROOM_AIRCOS: [], **user_input}
+                )
                 return self._save({CONF_ROOMS: rooms})
         return self.async_show_form(
             step_id="room",
@@ -462,6 +486,16 @@ class HaClimateOptionsFlow(OptionsFlow):
             }
             if used & set(user_input[CONF_ROOM_CLIMATES]):
                 errors[CONF_ROOM_CLIMATES] = "climate_in_use"
+        aircos = set(user_input.get(CONF_ROOM_AIRCOS) or [])
+        used_any = {
+            entity
+            for r in self._rooms
+            if r[CONF_ROOM_ID] != room_id
+            for key in (CONF_ROOM_CLIMATES, CONF_ROOM_AIRCOS)
+            for entity in r.get(key, [])
+        }
+        if aircos & (used_any | set(user_input.get(CONF_ROOM_CLIMATES) or [])):
+            errors[CONF_ROOM_AIRCOS] = "airco_in_use"
         day, night = user_input.get(CONF_DAY_TEMP), user_input.get(CONF_NIGHT_TEMP)
         if day is not None and night is not None and night >= day:
             errors[CONF_NIGHT_TEMP] = "night_above_day"

@@ -14,6 +14,8 @@ from homeassistant.helpers.typing import ConfigType
 from .const import (
     ATTR_CONFIG_ENTRY_ID,
     CONF_BASELINE_DAYS,
+    CONF_GAS_FIXED_COSTS,
+    CONF_GAS_FIXED_COSTS_UNIT,
     DOMAIN,
     SERVICE_RECALCULATE_BASELINE,
 )
@@ -86,6 +88,15 @@ async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         hass.config_entries.async_update_entry(
             entry, data=data, options=options, minor_version=2
         )
+    if entry.version == 1 and entry.minor_version < 3:
+        # 1.3: fixed delivery costs can be entered per month (new default);
+        # existing values were entered per day and keep that unit.
+        options = dict(entry.options)
+        if (entry.options.get(CONF_GAS_FIXED_COSTS) or entry.data.get(CONF_GAS_FIXED_COSTS)) and (
+            CONF_GAS_FIXED_COSTS_UNIT not in options
+        ):
+            options[CONF_GAS_FIXED_COSTS_UNIT] = "day"
+        hass.config_entries.async_update_entry(entry, options=options, minor_version=3)
     return True
 
 

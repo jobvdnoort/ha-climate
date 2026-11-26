@@ -16,10 +16,13 @@ from typing import Any
 from homeassistant.components.climate import (
     ATTR_CURRENT_TEMPERATURE,
     ATTR_HVAC_ACTION,
+    ATTR_HVAC_MODE,
+    ATTR_HVAC_MODES,
     ATTR_MAX_TEMP,
     ATTR_MIN_TEMP,
     ATTR_TARGET_TEMP_STEP,
     DOMAIN as CLIMATE_DOMAIN,
+    SERVICE_SET_HVAC_MODE,
     SERVICE_SET_TEMPERATURE,
     HVACMode,
 )
@@ -48,6 +51,11 @@ from .calculations import (
     FireplaceDetector,
     accumulated_degree_days,
     calculate_baseline,
+    corrected_heating_limit,
+    daily_fixed_costs,
+    describe_night,
+    format_number,
+    rank_rooms,
     day_fraction,
     degree_days,
     expected_gas,
@@ -68,7 +76,9 @@ from .const import (
     CONF_FIREPLACE_TEMP_SENSOR,
     CONF_FIREPLACE_THRESHOLD,
     CONF_GAS_PRICE,
+    CONF_DD_INDOOR_CORRECTION,
     CONF_GAS_FIXED_COSTS,
+    CONF_GAS_FIXED_COSTS_UNIT,
     CONF_GAS_PRICE_ENTITY,
     CONF_GAS_SENSOR,
     CONF_HEATING_LIMIT,
@@ -78,12 +88,17 @@ from .const import (
     CONF_NIGHT_TEMP,
     CONF_OPTIMUM_START,
     CONF_OUTDOOR_SENSOR,
+    CONF_ROOM_AIRCOS,
     CONF_ROOM_CLIMATES,
     CONF_ROOM_ID,
     CONF_ROOM_NAME,
     CONF_ROOM_USE_GLOBAL,
     CONF_ROOMS,
+    CONF_SAVINGS_START,
+    AIRCO_ACTIVE_ACTIONS,
+    AIRCO_DEFAULT_COOL_TEMP,
     DEFAULT_BASELINE_DAYS,
+    DEFAULT_FIXED_COSTS_UNIT,
     DEFAULT_COMFORT_TIME,
     DEFAULT_FIREPLACE_THRESHOLD,
     DEFAULT_GAS_PRICE,
@@ -98,6 +113,8 @@ from .const import (
     HEATING_ACTIONS,
     HISTORY_RETENTION_DAYS,
     HISTORY_STORAGE_KEY,
+    MAX_EVENTS,
+    RANKING_DAYS,
     STORAGE_KEY,
     STORAGE_VERSION,
     UPDATE_INTERVAL,
@@ -288,6 +305,10 @@ class HaClimateCoordinator(DataUpdateCoordinator[EnergyData]):
         history.setdefault("days", {})
         history.setdefault("models", {})
         history.setdefault("overlap_start", None)
+        history.setdefault("indoor", {})  # day -> [Σ measured, n, Σ target, n]
+        history.setdefault("events", [])  # [{"ts", "type", "room", "text"}]
+        stored.setdefault("frozen_baseline", None)
+        stored.setdefault("night_signature", None)
         # Migrate models from the old single storage file. The history is
         # written right away, before the old copy can disappear from storage.
         legacy_models = stored.pop("models", None)
@@ -299,6 +320,79 @@ class HaClimateCoordinator(DataUpdateCoordinator[EnergyData]):
         for room in self.rooms:
             self.models[room[CONF_ROOM_ID]] = RoomThermalModel.from_dict(
                 history["models"].get(room[CONF_ROOM_ID])
+            )
+        self._log_night_setting_changes()
+
+    # ------------------------------------------------------------------
+    # Event log (kept permanently in the history store)
+    # ------------------------------------------------------------------
+    def log_event(
+        self, kind: str, text: str, room_id: str | None = None, when: datetime | None = None
+    ) -> None:
+        """Store an event that is shown in the charts and the CSV export."""
+        events: list[dict[str, Any]] = self._history["events"]
+        events.append(
+            {
+                "ts": (when or dt_util.now()).isoformat(),
+                "type": kind,
+                "room": room_id,
+                "text": text,
+            }
+        )
+        del events[:-MAX_EVENTS]
+        self._async_save_history()
+
+    def events_by_day(self) -> dict[str, list[dict[str, Any]]]:
+        """Events grouped by local date."""
+        result: dict[str, list[dict[str, Any]]] = {}
+        for event in self._history["events"]:
+            moment = dt_util.parse_datetime(event["ts"])
+            if moment is None:
+                continue
+            result.setdefault(dt_util.as_local(moment).date().isoformat(), []).append(event)
+        return result
+
+    def _night_description(self, room: dict[str, Any] | None = None) -> str:
+        if room is None:
+            cfg = self.config
+            return describe_night(
+                str(cfg.get(CONF_NIGHT_START) or DEFAULT_NIGHT_START),
+                str(cfg.get(CONF_NIGHT_END) or DEFAULT_NIGHT_END),
+                float(cfg.get(CONF_NIGHT_OFFSET, DEFAULT_NIGHT_OFFSET)),
+            )
+        schedule = self.schedule(room)
+        end = schedule.comfort_time if schedule.optimum_start else schedule.end
+        text = describe_night(
+            schedule.start.strftime("%H:%M"),
+            end.strftime("%H:%M"),
+            schedule.offset,
+            schedule.night_temp,
+        )
+        return f"{text}, optimum start" if schedule.optimum_start else text
+
+    def _log_night_setting_changes(self) -> None:
+        """Compare the night settings with the last known ones (any source)."""
+        signature = {"global": self._night_description()}
+        names = {}
+        for room in self.rooms:
+            signature[room[CONF_ROOM_ID]] = self._night_description(room)
+            names[room[CONF_ROOM_ID]] = room[CONF_ROOM_NAME]
+        previous = self._stored.get("night_signature")
+        self._stored["night_signature"] = signature
+        if previous is None:
+            return
+        if previous != signature:
+            self._async_save()
+        if previous.get("global") != signature["global"]:
+            self.log_event(
+                "settings", f"Nachtverlaging aangepast: {signature['global']}"
+            )
+        for room_id, text in signature.items():
+            if room_id == "global" or previous.get(room_id) == text:
+                continue
+            verb = "ingesteld" if room_id not in previous else "aangepast"
+            self.log_event(
+                "settings", f"Nachtverlaging {names[room_id]} {verb}: {text}", room_id
             )
 
     @callback
@@ -410,6 +504,12 @@ class HaClimateCoordinator(DataUpdateCoordinator[EnergyData]):
 
     async def async_set_master(self, enabled: bool) -> None:
         """Enable/disable the night setback for all thermostats."""
+        if self._stored.get("master", True) != enabled:
+            self.log_event(
+                "master",
+                f"Nachtverlaging {'aan' if enabled else 'uit'} (alle thermostaten, "
+                f"{self._night_description()})",
+            )
         self._stored["master"] = enabled
         self._async_save()
         await self._async_evaluate_setback(dt_util.now())
@@ -417,6 +517,13 @@ class HaClimateCoordinator(DataUpdateCoordinator[EnergyData]):
 
     async def async_set_room(self, room_id: str, enabled: bool) -> None:
         """Enable/disable the night setback for a single room."""
+        if self.room_enabled(room_id) != enabled and (room := self.room(room_id)):
+            self.log_event(
+                "room",
+                f"Nachtverlaging {room[CONF_ROOM_NAME]} {'aan' if enabled else 'uit'}"
+                f" ({self._night_description(room)})",
+                room_id,
+            )
         self._stored["room_enabled"][room_id] = enabled
         self._async_save()
         await self._async_evaluate_setback(dt_util.now())
@@ -446,39 +553,54 @@ class HaClimateCoordinator(DataUpdateCoordinator[EnergyData]):
     # ------------------------------------------------------------------
     # Room measurements
     # ------------------------------------------------------------------
+    def _climate_info(self, entity_id: str) -> dict[str, Any]:
+        state = self.hass.states.get(entity_id)
+        if state is None:
+            return {"entity_id": entity_id, "available": False}
+        return {
+            "entity_id": entity_id,
+            "name": state.attributes.get("friendly_name", entity_id),
+            "available": state.state not in (STATE_UNAVAILABLE, STATE_UNKNOWN),
+            "hvac_mode": state.state,
+            "hvac_modes": list(state.attributes.get(ATTR_HVAC_MODES) or []),
+            "hvac_action": state.attributes.get(ATTR_HVAC_ACTION),
+            "current_temperature": _float_or_none(
+                state.attributes.get(ATTR_CURRENT_TEMPERATURE)
+            ),
+            "target_temperature": _float_or_none(state.attributes.get(ATTR_TEMPERATURE)),
+            "min_temp": _float_or_none(state.attributes.get(ATTR_MIN_TEMP)),
+            "max_temp": _float_or_none(state.attributes.get(ATTR_MAX_TEMP)),
+            "step": _float_or_none(state.attributes.get(ATTR_TARGET_TEMP_STEP)),
+        }
+
     def room_measurements(self, room: dict[str, Any]) -> dict[str, Any]:
-        """Return the live measurements of the loops in a room."""
-        loops = []
-        for entity_id in room.get(CONF_ROOM_CLIMATES, []):
-            state = self.hass.states.get(entity_id)
-            if state is None:
-                loops.append({"entity_id": entity_id, "available": False})
-                continue
-            loops.append(
-                {
-                    "entity_id": entity_id,
-                    "name": state.attributes.get("friendly_name", entity_id),
-                    "available": state.state not in (STATE_UNAVAILABLE, STATE_UNKNOWN),
-                    "hvac_mode": state.state,
-                    "hvac_action": state.attributes.get(ATTR_HVAC_ACTION),
-                    "current_temperature": _float_or_none(
-                        state.attributes.get(ATTR_CURRENT_TEMPERATURE)
-                    ),
-                    "target_temperature": _float_or_none(
-                        state.attributes.get(ATTR_TEMPERATURE)
-                    ),
-                    "min_temp": _float_or_none(state.attributes.get(ATTR_MIN_TEMP)),
-                    "max_temp": _float_or_none(state.attributes.get(ATTR_MAX_TEMP)),
-                }
-            )
+        """Return the live measurements of the loops (and aircos) in a room."""
+        loops = [self._climate_info(e) for e in room.get(CONF_ROOM_CLIMATES, [])]
+        aircos = [self._climate_info(e) for e in room.get(CONF_ROOM_AIRCOS, [])]
         available = [loop for loop in loops if loop.get("available")]
         actions = [loop["hvac_action"] for loop in available if loop.get("hvac_action")]
         return {
             "loops": loops,
+            "aircos": aircos,
             "current_temperature": _mean([loop["current_temperature"] for loop in available]),
             "target_temperature": _mean([loop["target_temperature"] for loop in available]),
             "heating": (any(a in HEATING_ACTIONS for a in actions) if actions else None),
+            "airco_active": self._airco_active(aircos),
         }
+
+    @staticmethod
+    def _airco_active(aircos: list[dict[str, Any]]) -> bool:
+        """An airco that heats or cools disturbs the floor heating model."""
+        for airco in aircos:
+            if not airco.get("available"):
+                continue
+            action = airco.get("hvac_action")
+            if action in AIRCO_ACTIVE_ACTIONS:
+                return True
+            if action is None and airco.get("hvac_mode") not in (HVACMode.OFF, None):
+                # Without hvac_action an airco that is switched on counts as active.
+                return True
+        return False
 
     def room_has_fireplace(self, room: dict[str, Any]) -> bool:
         """Return whether the fireplace thermostat belongs to this room."""
@@ -494,13 +616,33 @@ class HaClimateCoordinator(DataUpdateCoordinator[EnergyData]):
     def _learn(self, now: datetime) -> None:
         outside = self.outdoor_temperature()
         learned = False
+        indoor: list[float] = []
+        targets: list[float] = []
         for room in self.rooms:
             measured = self.room_measurements(room)
-            valid = not (self.room_has_fireplace(room) and self.fireplace.active)
+            if measured["current_temperature"] is not None:
+                indoor.append(measured["current_temperature"])
+            if measured["target_temperature"] is not None:
+                targets.append(measured["target_temperature"])
+            valid = not (
+                (self.room_has_fireplace(room) and self.fireplace.active)
+                or measured["airco_active"]
+            )
             if self.model(room[CONF_ROOM_ID]).add_sample(
                 now, measured["current_temperature"], outside, measured["heating"], valid
             ):
                 learned = True
+        if indoor or targets:
+            day = now.date().isoformat()
+            log = self._history["indoor"].setdefault(day, [0.0, 0, 0.0, 0])
+            if indoor:
+                log[0] = round(log[0] + sum(indoor) / len(indoor), 3)
+                log[1] += 1
+            if targets:
+                log[2] = round(log[2] + sum(targets) / len(targets), 3)
+                log[3] += 1
+            # Minute counters change constantly; the delayed save batches them.
+            learned = learned or now.minute % 15 == 0
         if learned:
             self._async_save_history()
 
@@ -707,6 +849,76 @@ class HaClimateCoordinator(DataUpdateCoordinator[EnergyData]):
             if _float_or_none(climate.attributes.get(ATTR_TEMPERATURE)) != schedule.day_temp:
                 await self._async_set_temperature(entity_id, schedule.day_temp)
 
+    async def async_set_room_temperature(self, room: dict[str, Any], temperature: float) -> list[str]:
+        """Set all floor heating loops of a room to one temperature."""
+        changed = []
+        for entity_id in room.get(CONF_ROOM_CLIMATES, []):
+            info = self._climate_info(entity_id)
+            if not info.get("available") or info.get("hvac_mode") == HVACMode.OFF:
+                continue
+            target = temperature
+            if info.get("min_temp") is not None:
+                target = max(target, info["min_temp"])
+            if info.get("max_temp") is not None:
+                target = min(target, info["max_temp"])
+            if await self._async_set_temperature(entity_id, target):
+                changed.append(entity_id)
+        self.async_update_listeners()
+        return changed
+
+    async def async_airco(
+        self,
+        room: dict[str, Any],
+        mode: str | None = None,
+        temperature: float | None = None,
+        entity_ids: list[str] | None = None,
+    ) -> None:
+        """Control the aircos of a room: mode off/cool/boost and/or temperature."""
+        aircos = [
+            e for e in room.get(CONF_ROOM_AIRCOS, []) if entity_ids is None or e in entity_ids
+        ]
+        if not aircos:
+            raise HomeAssistantError("Deze kamer heeft geen airco")
+        comfort = self.comfort_temperature(room)
+        for entity_id in aircos:
+            info = self._climate_info(entity_id)
+            modes = info.get("hvac_modes") or []
+            target = temperature
+            if mode == "off":
+                await self._async_call_climate(
+                    SERVICE_SET_HVAC_MODE, entity_id, {ATTR_HVAC_MODE: HVACMode.OFF}
+                )
+                continue
+            if mode == "cool":
+                if modes and HVACMode.COOL not in modes:
+                    raise HomeAssistantError(f"{entity_id} kan niet koelen")
+                await self._async_call_climate(
+                    SERVICE_SET_HVAC_MODE, entity_id, {ATTR_HVAC_MODE: HVACMode.COOL}
+                )
+                if target is None and info.get("target_temperature") is None:
+                    target = AIRCO_DEFAULT_COOL_TEMP
+            elif mode == "boost":
+                if modes and HVACMode.HEAT not in modes:
+                    raise HomeAssistantError(f"{entity_id} kan niet verwarmen")
+                await self._async_call_climate(
+                    SERVICE_SET_HVAC_MODE, entity_id, {ATTR_HVAC_MODE: HVACMode.HEAT}
+                )
+                if target is None:
+                    # Quickly heat to the room's comfort temperature (+0.5 °C margin).
+                    target = (comfort or info.get("target_temperature") or 21.0) + 0.5
+            if target is not None:
+                await self._async_call_climate(
+                    SERVICE_SET_TEMPERATURE, entity_id, {ATTR_TEMPERATURE: target}
+                )
+        self.async_update_listeners()
+
+    async def _async_call_climate(
+        self, service: str, entity_id: str, data: dict[str, Any]
+    ) -> None:
+        await self.hass.services.async_call(
+            CLIMATE_DOMAIN, service, {ATTR_ENTITY_ID: entity_id, **data}, blocking=True
+        )
+
     def comfort_target(self, entity_id: str) -> float | None:
         """Return the comfort target of a loop (the original one during setback)."""
         for state in self._stored["room_state"].values():
@@ -878,6 +1090,7 @@ class HaClimateCoordinator(DataUpdateCoordinator[EnergyData]):
             setback_days=setback_days,
             min_degree_days=BASELINE_MIN_DEGREE_DAYS,
             min_days=BASELINE_MIN_DAYS,
+            limits=self._limits(records),
         )
         previous = self.baseline
         if result.reliable or previous is None or not previous.reliable:
@@ -895,11 +1108,85 @@ class HaClimateCoordinator(DataUpdateCoordinator[EnergyData]):
             _LOGGER.info(
                 "Only %s usable days found, keeping previous baseline", result.days_used
             )
-        self._backfill_savings(records)
+        self._backfill_savings(self._stored_records(self._measurement_start(), today))
         self._async_save()
         _LOGGER.debug("Baseline: %s", self.baseline)
         self.async_update_listeners()
         return self.baseline
+
+    # ---- frozen baseline & savings period ---------------------------
+    @property
+    def frozen_baseline(self) -> dict[str, Any] | None:
+        """The frozen baseline (value and context) or None."""
+        return self._stored.get("frozen_baseline")
+
+    @property
+    def effective_baseline(self) -> float | None:
+        """Baseline used for the expected gas usage (frozen value wins)."""
+        if (frozen := self.frozen_baseline) is not None:
+            return frozen["m3_per_degree_day"]
+        return self.baseline.m3_per_degree_day if self.baseline else None
+
+    @property
+    def savings_start(self) -> date | None:
+        """First day of the savings measurement (configurable)."""
+        value = self.config.get(CONF_SAVINGS_START)
+        if not value:
+            return None
+        try:
+            return date.fromisoformat(str(value)[:10])
+        except ValueError:
+            return None
+
+    def freeze_baseline(self, freeze: bool) -> None:
+        """Freeze the current baseline (or unfreeze)."""
+        if freeze:
+            if self.baseline is None or not self.baseline.is_valid:
+                raise HomeAssistantError("Er is nog geen baseline om te bevriezen")
+            self._stored["frozen_baseline"] = {
+                **_baseline_to_dict(self.baseline),
+                "frozen_at": dt_util.now().isoformat(),
+            }
+            self.log_event(
+                "baseline",
+                "Baseline bevroren op "
+                f"{format_number(self.baseline.m3_per_degree_day, 3)} m³/graaddag"
+                f" ({self.baseline.days_used} dagen)",
+            )
+        elif self._stored.get("frozen_baseline") is not None:
+            self._stored["frozen_baseline"] = None
+            self.log_event("baseline", "Baseline niet meer bevroren")
+        self._stored["savings"] = {}  # recomputed against the new baseline
+        self._async_save()
+
+    def _measurement_start(self) -> date:
+        """Savings are counted from the configured start (or installation)."""
+        return self.savings_start or date.fromisoformat(self._stored["installed_on"])
+
+    @property
+    def indoor_correction(self) -> bool:
+        """Whether degree days are corrected for the indoor target temperature."""
+        return bool(self.config.get(CONF_DD_INDOOR_CORRECTION, False))
+
+    def indoor_day(self, day: date) -> tuple[float | None, float | None]:
+        """Mean measured and target indoor temperature of a day."""
+        log = self._history["indoor"].get(day.isoformat())
+        if not log:
+            return None, None
+        measured = log[0] / log[1] if log[1] else None
+        target = log[2] / log[3] if log[3] else None
+        return measured, target
+
+    def heating_limit_for(self, day: date) -> float:
+        """Heating limit of a day, corrected for the indoor target if enabled."""
+        if not self.indoor_correction:
+            return self.heating_limit
+        return corrected_heating_limit(self.heating_limit, self.indoor_day(day)[1])
+
+    def _limits(self, records: list[DayRecord]) -> dict[date, float] | None:
+        if not self.indoor_correction:
+            return None
+        return {r.day: self.heating_limit_for(r.day) for r in records}
 
     def baseline_info(self) -> dict[str, Any]:
         """Describe the period the baseline is based on."""
@@ -909,6 +1196,11 @@ class HaClimateCoordinator(DataUpdateCoordinator[EnergyData]):
             "window_start": stored.get("window_start"),
             "days_available": stored.get("days_available"),
             "days_stored": len(self._history["days"]),
+            "frozen": self.frozen_baseline,
+            "effective": self.effective_baseline,
+            "savings_start": self.savings_start.isoformat() if self.savings_start else None,
+            "measurement_start": self._measurement_start().isoformat(),
+            "indoor_correction": self.indoor_correction,
         }
 
     def _fireplace_entity_id(self) -> str | None:
@@ -927,7 +1219,11 @@ class HaClimateCoordinator(DataUpdateCoordinator[EnergyData]):
             fireplace = self._fireplace_entity_id() if self.room_has_fireplace(room) else None
             try:
                 observations, summary = await async_backfill_observations(
-                    self.hass, room.get(CONF_ROOM_CLIMATES, []), outdoor, fireplace
+                    self.hass,
+                    room.get(CONF_ROOM_CLIMATES, []),
+                    outdoor,
+                    fireplace,
+                    aircos=room.get(CONF_ROOM_AIRCOS, []),
                 )
             except Exception:  # noqa: BLE001
                 _LOGGER.exception("Reading recorder history for %s failed", room[CONF_ROOM_NAME])
@@ -961,17 +1257,18 @@ class HaClimateCoordinator(DataUpdateCoordinator[EnergyData]):
 
     def _backfill_savings(self, records: list[DayRecord]) -> None:
         """Store the savings of every completed day since installation."""
-        if self.baseline is None or not self.baseline.is_valid:
+        baseline = self.effective_baseline
+        if baseline is None:
             return
-        installed = date.fromisoformat(self._stored["installed_on"])
+        start = self._measurement_start()
         today = dt_util.now().date()
         for record in records:
-            if record.day < installed or record.day >= today:
+            if record.day < start or record.day >= today:
                 continue
             saved = gas_savings(
                 expected_gas(
-                    self.baseline.m3_per_degree_day,
-                    degree_days(record.mean_temperature, self.heating_limit),
+                    baseline,
+                    degree_days(record.mean_temperature, self.heating_limit_for(record.day)),
                 ),
                 record.gas,
             )
@@ -984,50 +1281,60 @@ class HaClimateCoordinator(DataUpdateCoordinator[EnergyData]):
             return None
         return gas * price + fixed
 
-    async def async_history(self, days: int) -> list[dict[str, Any]]:
-        """Return per-day analytics for the panel (oldest first, today last)."""
+    def _day_rows(self, records: list[DayRecord], include_today: bool) -> list[dict[str, Any]]:
+        """Per-day analytics rows (charts and CSV export)."""
         today = dt_util.now().date()
-        try:
-            await self._async_sync_days(days=days)
-        except Exception:  # noqa: BLE001
-            _LOGGER.debug("Could not sync recent statistics", exc_info=True)
-        records = self._stored_records(today - timedelta(days=days), today)
-        baseline = self.baseline.m3_per_degree_day if self.baseline else None
+        baseline = self.effective_baseline
         fireplace_days, setback_days = self._excluded_days()
+        events = self.events_by_day()
         price = self.data.gas_price if self.data else self._gas_price()[0]
         fixed = self.data.fixed_costs if self.data else self._fixed_costs()
+        start = self.savings_start
         rows: list[dict[str, Any]] = []
         cumulative = 0.0
 
         def row(day: date, mean, dd, gas, expected, saved, **extra) -> dict[str, Any]:
             nonlocal cumulative
-            cumulative += saved or 0.0
+            counting = start is None or day >= start
+            if counting:
+                cumulative += saved or 0.0
+            indoor, target = self.indoor_day(day)
             return {
                 "date": day.isoformat(),
                 "mean_temperature": mean,
+                "indoor_temperature": indoor,
+                "indoor_target": target,
+                "heating_limit": self.heating_limit_for(day),
                 "degree_days": dd,
                 "gas": gas,
                 "expected": expected,
                 "saved": saved,
                 "saved_eur": money(saved, price),
-                "cumulative_saved": cumulative,
-                "cumulative_saved_eur": cumulative * price,
+                "cumulative_saved": cumulative if counting else None,
+                "cumulative_saved_eur": cumulative * price if counting else None,
                 "cost_variable": money(gas, price),
                 "cost_fixed": fixed if gas is not None else None,
                 "cost": self.gas_cost(gas, price, fixed),
                 "fireplace": day in fireplace_days,
+                "fireplace_minutes": int(
+                    self._stored["fireplace_minutes"].get(day.isoformat(), 0)
+                ),
                 "setback": day in setback_days,
+                "events": [
+                    {"time": e["ts"], "type": e["type"], "text": e["text"]}
+                    for e in events.get(day.isoformat(), [])
+                ],
                 **extra,
             }
 
         for record in records:
-            dd = degree_days(record.mean_temperature, self.heating_limit)
+            dd = degree_days(record.mean_temperature, self.heating_limit_for(record.day))
             expected = expected_gas(baseline, dd)
             rows.append(
                 row(record.day, record.mean_temperature, dd, record.gas, expected,
                     gas_savings(expected, record.gas))
             )
-        if self.data is not None:
+        if include_today and self.data is not None:
             rows.append(
                 row(
                     today,
@@ -1042,6 +1349,54 @@ class HaClimateCoordinator(DataUpdateCoordinator[EnergyData]):
             rows[-1]["fireplace"] = self.fireplace_minutes_today() >= FIREPLACE_EXCLUDE_MINUTES
         return rows
 
+    async def async_history(self, days: int) -> list[dict[str, Any]]:
+        """Return per-day analytics for the panel (oldest first, today last)."""
+        today = dt_util.now().date()
+        try:
+            await self._async_sync_days(days=days)
+        except Exception:  # noqa: BLE001
+            _LOGGER.debug("Could not sync recent statistics", exc_info=True)
+        return self._day_rows(
+            self._stored_records(today - timedelta(days=days), today), include_today=True
+        )
+
+    def export_rows(self) -> list[dict[str, Any]]:
+        """All permanently stored days (for the CSV export)."""
+        today = dt_util.now().date()
+        start = min(
+            (date.fromisoformat(d) for d in self._history["days"]), default=today
+        )
+        return self._day_rows(self._stored_records(start, today), include_today=True)
+
+    # ---- room ranking -------------------------------------------------
+    def room_ranking(self, days: int = RANKING_DAYS) -> list[dict[str, Any]]:
+        """Rank rooms from least to most efficient (heat loss and heating share)."""
+        cutoff = int((dt_util.utcnow() - timedelta(days=days)).timestamp())
+        values = []
+        info = {}
+        for room in self.rooms:
+            room_id = room[CONF_ROOM_ID]
+            model = self.model(room_id)
+            recent = [o for o in model.observations if o.start >= cutoff]
+            duty = sum(o.duty for o in recent) / len(recent) if recent else None
+            values.append((room_id, model.estimate.cooling_coefficient, duty))
+            info[room_id] = {"name": room[CONF_ROOM_NAME], "windows": len(recent)}
+        return [
+            {
+                "room_id": r.room_id,
+                "name": info[r.room_id]["name"],
+                "rank": r.rank,
+                "heat_loss": r.heat_loss,
+                "duty": r.duty,
+                "score": r.score,
+                "label": r.label,
+                "tags": r.tags,
+                "windows": info[r.room_id]["windows"],
+                "days": days,
+            }
+            for r in rank_rooms(values)
+        ]
+
     # ------------------------------------------------------------------
     # Savings total (restored by the sensor via RestoreEntity)
     # ------------------------------------------------------------------
@@ -1054,7 +1409,10 @@ class HaClimateCoordinator(DataUpdateCoordinator[EnergyData]):
 
     def _saved_total(self, saved_today: float | None) -> tuple[float | None, int]:
         today = dt_util.now().date().isoformat()
-        completed = {d: v for d, v in self._stored["savings"].items() if d < today}
+        start = self._measurement_start().isoformat()
+        completed = {
+            d: v for d, v in self._stored["savings"].items() if start <= d < today
+        }
         offset = float(self._stored["savings_offset"])
         if not completed and saved_today is None and not offset:
             return None, 0
@@ -1075,7 +1433,10 @@ class HaClimateCoordinator(DataUpdateCoordinator[EnergyData]):
 
     def _fixed_costs(self) -> float:
         """Fixed gas delivery costs in € per day (0 when not set)."""
-        return _float_or_none(self.config.get(CONF_GAS_FIXED_COSTS)) or 0.0
+        return daily_fixed_costs(
+            _float_or_none(self.config.get(CONF_GAS_FIXED_COSTS)),
+            self.config.get(CONF_GAS_FIXED_COSTS_UNIT) or DEFAULT_FIXED_COSTS_UNIT,
+        )
 
     async def _async_gas_today(self, start: datetime, now: datetime) -> float | None:
         """Gas used today; falls back to the meter reading stored at midnight."""
@@ -1099,8 +1460,6 @@ class HaClimateCoordinator(DataUpdateCoordinator[EnergyData]):
         yesterday = today - timedelta(days=1)
         temp_id = cfg[CONF_OUTDOOR_SENSOR]
         gas_id = cfg[CONF_GAS_SENSOR]
-        limit = self.heating_limit
-
         price, source = self._gas_price()
         data = EnergyData(
             gas_price=price, gas_price_source=source, fixed_costs=self._fixed_costs()
@@ -1119,13 +1478,16 @@ class HaClimateCoordinator(DataUpdateCoordinator[EnergyData]):
             self.hass, gas_id, yesterday, today, "change"
         )
 
+        limit_today = self.heating_limit_for(today.date())
         data.degree_days_today = accumulated_degree_days(
-            data.mean_temp_today, limit, day_fraction(now)
+            data.mean_temp_today, limit_today, day_fraction(now)
         )
-        data.degree_days_today_forecast = degree_days(data.mean_temp_today, limit)
-        data.degree_days_yesterday = degree_days(data.mean_temp_yesterday, limit)
+        data.degree_days_today_forecast = degree_days(data.mean_temp_today, limit_today)
+        data.degree_days_yesterday = degree_days(
+            data.mean_temp_yesterday, self.heating_limit_for(yesterday.date())
+        )
 
-        baseline = self.baseline.m3_per_degree_day if self.baseline else None
+        baseline = self.effective_baseline
         data.expected_today = expected_gas(baseline, data.degree_days_today)
         data.expected_yesterday = expected_gas(baseline, data.degree_days_yesterday)
         data.saved_today = gas_savings(data.expected_today, data.gas_today)
@@ -1134,7 +1496,7 @@ class HaClimateCoordinator(DataUpdateCoordinator[EnergyData]):
         yesterday_key = yesterday.date().isoformat()
         if (
             data.saved_yesterday is not None
-            and yesterday_key >= self._stored["installed_on"]
+            and yesterday_key >= self._measurement_start().isoformat()
             and self._stored["savings"].get(yesterday_key) != data.saved_yesterday
         ):
             self._stored["savings"][yesterday_key] = data.saved_yesterday

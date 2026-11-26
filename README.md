@@ -28,8 +28,8 @@ Na installatie verschijnt **HA Climate** (thermostaat-icoon) in de linkerzijbalk
 
 | Tabblad | Inhoud |
 |---|---|
-| **Kamers** | Kaart per kamer met huidige temperatuur, doeltemperatuur, dagtemperatuur, status (verwarmen / voorverwarmen / nachtverlaging / openhaard actief) en modelbetrouwbaarheid. Kamers toevoegen, bewerken en verwijderen; nachtverlaging per kamer of voor alle thermostaten schakelen. |
-| **Analyses** | Totale gaskosten (variabel + vast) voor vandaag, gisteren en de gekozen periode; variabele besparing; interactieve grafieken (met tooltips) van graaddagen vs. werkelijk en verwacht gasverbruik en de cumulatieve besparing in m³ of €. Per kamer (selector) een **Model status**-kaart: confidence, aantal meetpunten (uit historie / live), 3-stappen voortgang (*Data verzamelen → Kamer leren → Voorspellend regelen*), afkoelsnelheid/warmteverlies, opwarmsnelheid en tijdconstante. Bij de baseline en elk kamermodel staat vanaf welke datum en over hoeveel dagen/meetpunten gerekend wordt. Periode 14 – 365 dagen. |
+| **Kamers** | Kaart per kamer met huidige temperatuur, doeltemperatuur (met **−/+** in stappen van 0,5 °C die direct alle vloerverwarmingslussen van de kamer tegelijk instellen), dagtemperatuur, status (verwarmen / voorverwarmen / nachtverlaging / openhaard actief) en modelbetrouwbaarheid. Heeft de kamer een airco, dan verschijnt een airco-sectie met status, **Uit / Koelen / Boost** en een eigen −/+. Kamers toevoegen, bewerken en verwijderen; nachtverlaging per kamer of voor alle thermostaten schakelen. |
+| **Analyses** | Totale gaskosten (variabel + vast) voor vandaag, gisteren en de gekozen periode; variabele besparing; interactieve grafieken (met tooltips) van graaddagen vs. werkelijk en verwacht gasverbruik en de cumulatieve besparing in m³ of €. Per kamer (selector) een **Model status**-kaart: confidence, aantal meetpunten (uit historie / live), 3-stappen voortgang (*Data verzamelen → Kamer leren → Voorspellend regelen*), afkoelsnelheid/warmteverlies, opwarmsnelheid en tijdconstante. Bij de baseline en elk kamermodel staat vanaf welke datum en over hoeveel dagen/meetpunten gerekend wordt. **Vergelijking kamers** rangschikt de ruimtes van minst naar meest zuinig (warmteverlies en stookpercentage) met een label. Gebeurtenissen (nachtverlaging aan/uit, gewijzigde instellingen, baseline bevroren) staan als markeringen in de grafieken. De tooltip van de gasgrafiek toont ook de gemiddelde binnen- en doeltemperatuur. Knoppen voor **Baseline bevriezen** (met startdatum) en **Exporteer CSV**. Periode 14 – 365 dagen. |
 | **Schema's** | Per kamer: dagtemperatuur, nachttemperatuur (vast) of verlaging (relatief), eigen tijden of de algemene, "op temperatuur om"-tijd en Optimum Start, met de geplande starttijd. |
 | **Instellingen** | Buitentemperatuur- en gassensor, gasprijs (vast of entiteit), stookgrens, historie, algemene nachtverlaging en openhaard. |
 
@@ -44,7 +44,9 @@ Bij het toevoegen kies je:
 | Buitentemperatuur-sensor | `sensor` met `device_class: temperature` en `state_class: measurement` |
 | Gasverbruik-sensor | Gasmeterstand in m³ (`device_class: gas`, `state_class: total_increasing`) |
 | Gasprijs | Vast bedrag in €/m³ en/of een entiteit (sensor/input_number); de entiteit gaat voor |
-| Vaste leveringskosten | Optioneel, € per dag (vastrecht/netbeheer), standaard 0,00; telt mee in de totale gaskosten, niet in de besparing |
+| Vaste leveringskosten | Optioneel (vastrecht/netbeheer), standaard 0,00, **per maand** (standaard) of per dag. Een maandbedrag wordt omgerekend naar dagkosten (`maandbedrag / 30,4375`). Telt mee in de totale gaskosten, niet in de besparing |
+| Startdatum besparing | Optioneel: vanaf deze dag wordt de besparing (cumulatief vanaf 0) gemeten |
+| Graaddagen corrigeren voor binnentemperatuur | Optioneel: stookgrens + (gemiddelde ingestelde binnentemperatuur − 20 °C) per dag |
 | Stookgrens | Standaard 18,0 °C |
 | Baseline-periode | Aantal dagen voor de baseline; 0 (standaard) = alles vanaf de eerste dag dat beide sensoren data hebben |
 | Nachtverlaging | Start 22:00, einde 06:30, verlaging −2,0 °C |
@@ -101,7 +103,19 @@ Meetmomenten met gaten, onbekende `hvac_action` of een brandende openhaard worde
 
 **Optimum Start.** Met "op temperatuur om" (bijv. 07:00) en Optimum Start aan berekent HA Climate elke minuut hoe lang het opwarmen duurt van de huidige binnentemperatuur naar de dagtemperatuur, rekening houdend met de buitentemperatuur (oplossing van bovenstaande vergelijking), plus 15 minuten marge. Op dat moment eindigt de nachtverlaging. Zolang de betrouwbaarheid onder 50 % ligt, wordt een **veilige fallback** gebruikt: 0,5 °C per uur, of het model als dat een vroegere start geeft. De voorverwarmtijd is begrensd op 6 uur en na het herstel wordt in dezelfde nacht niet opnieuw verlaagd. De status wordt persistent opgeslagen, zodat een herstart van Home Assistant niets verstoort. Uitschakelen van een schakelaar, verwijderen van een ruimte of van de integratie herstelt de lussen direct.
 
-**Besparing totaal** telt de besparing (verwacht − werkelijk) van alle afgeronde dagen sinds de installatie plus vandaag tot nu. Gemiste dagen worden bij het herberekenen van de baseline aangevuld uit de statistieken. De baseline krijgt al vanaf één bruikbare dag een waarde (zodat sensoren niet op "onbekend" blijven staan) en is vanaf 7 dagen "betrouwbaar". Negatieve dagverbruiken (meterwissel of -reset) worden genegeerd.
+**Airco's.** Per kamer kun je optioneel airco's (`climate`-entiteiten) koppelen. Die staan volledig los van de vloerverwarming: ze doen niet mee met nachtverlaging, dagschema's of Optimum Start. Zolang een airco verwarmt of koelt (`hvac_action` `heating`/`cooling`, of aan zonder `hvac_action`), wordt die periode uitgesloten van het thermische vloerverwarmingsmodel, ook bij de backfill uit de recorder-historie. *Boost* zet de airco op verwarmen naar de dagtemperatuur van de kamer + 0,5 °C; *Koelen* zet hem op koelen (standaard 22 °C als er nog geen doel is).
+
+**Baseline bevriezen.** Bevries de baseline (bijv. vlak voordat je nachtverlaging aanzet) en kies een startdatum voor de besparingsmeting. Vanaf die dag start de cumulatieve besparing op 0 en wordt het verbruik vergeleken met de bevroren waarde, ook als de historie later verandert.
+
+**Binnentemperatuur.** Elke minuut wordt de gemiddelde gemeten en ingestelde binnentemperatuur over de kamers bijgehouden en per dag permanent opgeslagen. Met de optionele correctie wordt de stookgrens per dag verschoven met het verschil tussen de gemiddelde doeltemperatuur en 20 °C (de vaste 18 °C-stookgrens gaat uit van ~20 °C binnen).
+
+**Onzuinigste ruimte.** Per kamer worden het genormaliseerde warmteverlies (de geleerde afkoelcoëfficiënt k, °C/uur per °C ΔT) en het stookpercentage van de afgelopen 7 dagen (gemiddelde inschakelduur van de meetblokken) gecombineerd tot een energiescore, relatief tot de slechtste kamer. Labels: *Hoog warmteverlies* (k ≥ 0,06), *Stookt veel* (≥ 50 % van de tijd), *Gemiddeld* (k ≥ 0,035 of ≥ 25 %) of *Zuinig*.
+
+**Wijzigingslogboek.** Nachtverlaging aan/uit (globaal of per kamer), gewijzigde nachtinstellingen (tijden, verlaging, nachttemperatuur, optimum start – ongeacht of dat via het paneel of de options flow gebeurt) en het bevriezen van de baseline worden permanent opgeslagen en in de grafieken en de export getoond.
+
+**CSV-export.** *Exporteer CSV* downloadt alle opgeslagen dagen (UTF-8, komma-gescheiden, punt als decimaalteken) met: datum, gemiddelde buiten-, binnen- en doeltemperatuur, stookgrens, graaddagen, werkelijk en verwacht gasverbruik, besparing (m³ en €), variabele, vaste en totale kosten, openhaard-minuten, nachtverlaging (ja/nee) en de gebeurtenissen van die dag.
+
+**Besparing totaal** telt de besparing (verwacht − werkelijk) van alle afgeronde dagen sinds de startdatum van de besparing (of anders de installatie) plus vandaag tot nu. Gemiste dagen worden bij het herberekenen van de baseline aangevuld uit de statistieken. De baseline krijgt al vanaf één bruikbare dag een waarde (zodat sensoren niet op "onbekend" blijven staan) en is vanaf 7 dagen "betrouwbaar". Negatieve dagverbruiken (meterwissel of -reset) worden genegeerd.
 
 ## Ontwikkeling & tests
 

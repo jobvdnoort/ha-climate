@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import asdict
+from datetime import date
 import logging
 from typing import Any
 import uuid
@@ -13,6 +14,7 @@ import voluptuous as vol
 from homeassistant.components import websocket_api
 from homeassistant.config_entries import ConfigEntryState
 from homeassistant.core import HomeAssistant, callback
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.util import dt as dt_util
 
 from .calculations import parse_time
@@ -25,6 +27,8 @@ from .const import (
     CONF_FIREPLACE_THRESHOLD,
     CONF_GAS_PRICE,
     CONF_GAS_FIXED_COSTS,
+    CONF_DD_INDOOR_CORRECTION,
+    CONF_GAS_FIXED_COSTS_UNIT,
     CONF_GAS_PRICE_ENTITY,
     CONF_GAS_SENSOR,
     CONF_HEATING_LIMIT,
@@ -34,13 +38,16 @@ from .const import (
     CONF_NIGHT_TEMP,
     CONF_OPTIMUM_START,
     CONF_OUTDOOR_SENSOR,
+    CONF_ROOM_AIRCOS,
     CONF_ROOM_CLIMATES,
     CONF_ROOM_ID,
     CONF_ROOM_NAME,
     CONF_ROOM_USE_GLOBAL,
     CONF_ROOMS,
+    CONF_SAVINGS_START,
     DEFAULT_BASELINE_DAYS,
     DEFAULT_COMFORT_TIME,
+    DEFAULT_FIXED_COSTS_UNIT,
     DEFAULT_FIREPLACE_THRESHOLD,
     DEFAULT_GAS_PRICE,
     DEFAULT_HEATING_LIMIT,
@@ -60,9 +67,12 @@ SETTING_KEYS = (
     CONF_GAS_SENSOR,
     CONF_GAS_PRICE,
     CONF_GAS_FIXED_COSTS,
+    CONF_GAS_FIXED_COSTS_UNIT,
     CONF_GAS_PRICE_ENTITY,
     CONF_HEATING_LIMIT,
     CONF_BASELINE_DAYS,
+    CONF_SAVINGS_START,
+    CONF_DD_INDOOR_CORRECTION,
     CONF_NIGHT_START,
     CONF_NIGHT_END,
     CONF_NIGHT_OFFSET,
@@ -73,6 +83,7 @@ SETTING_KEYS = (
 ROOM_KEYS = (
     CONF_ROOM_NAME,
     CONF_ROOM_CLIMATES,
+    CONF_ROOM_AIRCOS,
     CONF_ROOM_USE_GLOBAL,
     CONF_NIGHT_START,
     CONF_NIGHT_END,
@@ -92,6 +103,14 @@ def _time(value: Any) -> str:
         raise vol.Invalid(f"invalid time: {value}") from err
 
 
+def _date(value: Any) -> str:
+    """Validate an ISO date (YYYY-MM-DD)."""
+    try:
+        return date.fromisoformat(str(value)[:10]).isoformat()
+    except ValueError as err:
+        raise vol.Invalid(f"invalid date: {value}") from err
+
+
 _TEMP = vol.Any(None, vol.All(vol.Coerce(float), vol.Range(min=5, max=30)))
 _ENTITY = vol.Any(None, "", vol.Match(r"^[a-z0-9_]+\.[a-z0-9_]+$"))
 
@@ -100,6 +119,7 @@ ROOM_SCHEMA = vol.Schema(
         vol.Optional(CONF_ROOM_ID): str,
         vol.Optional(CONF_ROOM_NAME): vol.All(str, vol.Strip, vol.Length(min=1, max=64)),
         vol.Optional(CONF_ROOM_CLIMATES): [vol.Match(r"^climate\.[a-z0-9_]+$")],
+        vol.Optional(CONF_ROOM_AIRCOS): [vol.Match(r"^climate\.[a-z0-9_]+$")],
         vol.Optional(CONF_ROOM_USE_GLOBAL): bool,
         vol.Optional(CONF_NIGHT_START): _time,
         vol.Optional(CONF_NIGHT_END): _time,
@@ -122,8 +142,11 @@ SETTINGS_SCHEMA = vol.Schema(
         vol.Optional(CONF_HEATING_LIMIT): vol.All(vol.Coerce(float), vol.Range(min=10, max=25)),
         vol.Optional(CONF_BASELINE_DAYS): vol.All(vol.Coerce(int), vol.Range(min=0, max=3650)),
         vol.Optional(CONF_GAS_FIXED_COSTS): vol.Any(
-            None, vol.All(vol.Coerce(float), vol.Range(min=0, max=10))
+            None, vol.All(vol.Coerce(float), vol.Range(min=0, max=500))
         ),
+        vol.Optional(CONF_GAS_FIXED_COSTS_UNIT): vol.In(["month", "day"]),
+        vol.Optional(CONF_SAVINGS_START): vol.Any(None, "", _date),
+        vol.Optional(CONF_DD_INDOOR_CORRECTION): bool,
         vol.Optional(CONF_NIGHT_START): _time,
         vol.Optional(CONF_NIGHT_END): _time,
         vol.Optional(CONF_NIGHT_OFFSET): vol.All(vol.Coerce(float), vol.Range(min=-10, max=0)),
@@ -141,6 +164,10 @@ def async_register_websocket_api(hass: HomeAssistant) -> None:
     """Register all commands."""
     for command in (
         ws_state,
+        ws_export,
+        ws_set_room_temperature,
+        ws_airco,
+        ws_freeze_baseline,
         ws_history,
         ws_save_room,
         ws_delete_room,
@@ -183,7 +210,9 @@ async def _async_update_options(
 ) -> HaClimateCoordinator:
     """Store new options and wait until the entry has been reloaded."""
     old = entry.runtime_data
-    hass.config_entries.async_update_entry(entry, options=options)
+    if not hass.config_entries.async_update_entry(entry, options=options):
+        # Nothing changed, so there is no reload to wait for.
+        return old
     async with asyncio.timeout(RELOAD_TIMEOUT):
         while not (
             entry.state is ConfigEntryState.LOADED
@@ -230,6 +259,8 @@ def _room_payload(coordinator: HaClimateCoordinator, room: dict[str, Any]) -> di
         "comfort_temperature": _round(coordinator.comfort_temperature(room), 2),
         "heating": measured["heating"],
         "loops": measured["loops"],
+        "aircos": measured["aircos"],
+        "airco_active": measured["airco_active"],
         "model": {
             "cooling_coefficient": _round(estimate.cooling_coefficient, 4),
             "heating_power": _round(estimate.heating_power),
@@ -274,6 +305,8 @@ async def ws_state(hass, connection, msg, entry: HaClimateConfigEntry) -> None:
         (CONF_NIGHT_OFFSET, DEFAULT_NIGHT_OFFSET),
         (CONF_FIREPLACE_THRESHOLD, DEFAULT_FIREPLACE_THRESHOLD),
         (CONF_GAS_FIXED_COSTS, 0.0),
+        (CONF_GAS_FIXED_COSTS_UNIT, DEFAULT_FIXED_COSTS_UNIT),
+        (CONF_DD_INDOOR_CORRECTION, False),
     ):
         if settings.get(key) is None:
             settings[key] = default
@@ -317,6 +350,7 @@ async def ws_state(hass, connection, msg, entry: HaClimateConfigEntry) -> None:
                 "minutes_today": coordinator.fireplace_minutes_today(),
             },
             "rooms": [_room_payload(coordinator, room) for room in coordinator.rooms],
+            "ranking": coordinator.room_ranking(),
             "now": dt_util.now().isoformat(),
         },
     )
@@ -362,6 +396,16 @@ def _validate_room(
     }
     if used & set(climates):
         return "Een van deze lussen is al aan een andere ruimte gekoppeld."
+    aircos = set(room.get(CONF_ROOM_AIRCOS) or [])
+    used_any = {
+        entity
+        for r in rooms
+        if r[CONF_ROOM_ID] != room_id
+        for key in (CONF_ROOM_CLIMATES, CONF_ROOM_AIRCOS)
+        for entity in r.get(key, [])
+    }
+    if aircos & (used_any | set(climates)):
+        return "Een airco is al als lus of in een andere kamer gekoppeld."
     day, night = room.get(CONF_DAY_TEMP), room.get(CONF_NIGHT_TEMP)
     if day is not None and night is not None and night >= day:
         return "De nachttemperatuur moet lager zijn dan de dagtemperatuur."
@@ -523,3 +567,111 @@ async def ws_recalculate_baseline(hass, connection, msg, entry: HaClimateConfigE
     coordinator = entry.runtime_data
     await coordinator.async_recalculate()
     connection.send_result(msg["id"], {})
+
+
+@websocket_api.websocket_command(
+    {vol.Required("type"): "ha_climate/export", vol.Optional("entry_id"): str}
+)
+@websocket_api.async_response
+@_with_entry
+async def ws_export(hass, connection, msg, entry: HaClimateConfigEntry) -> None:
+    """Return all permanently stored days for the CSV export."""
+    coordinator = entry.runtime_data
+    connection.send_result(
+        msg["id"],
+        {
+            "days": coordinator.export_rows(),
+            "gas_price": coordinator.data.gas_price if coordinator.data else None,
+            "baseline": coordinator.effective_baseline,
+        },
+    )
+
+
+def _room_or_error(connection, msg, coordinator: HaClimateCoordinator):
+    room = coordinator.room(msg["room_id"])
+    if room is None:
+        connection.send_error(msg["id"], "not_found", "Ruimte niet gevonden")
+    return room
+
+
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): "ha_climate/room/set_temperature",
+        vol.Optional("entry_id"): str,
+        vol.Required("room_id"): str,
+        vol.Required("temperature"): vol.All(vol.Coerce(float), vol.Range(min=5, max=30)),
+    }
+)
+@websocket_api.require_admin
+@websocket_api.async_response
+@_with_entry
+async def ws_set_room_temperature(hass, connection, msg, entry: HaClimateConfigEntry) -> None:
+    """Set all floor heating loops of a room at once."""
+    coordinator = entry.runtime_data
+    if (room := _room_or_error(connection, msg, coordinator)) is None:
+        return
+    changed = await coordinator.async_set_room_temperature(room, msg["temperature"])
+    connection.send_result(msg["id"], {"entities": changed})
+
+
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): "ha_climate/airco",
+        vol.Optional("entry_id"): str,
+        vol.Required("room_id"): str,
+        vol.Optional("mode"): vol.In(["off", "cool", "boost"]),
+        vol.Optional("temperature"): vol.All(vol.Coerce(float), vol.Range(min=10, max=32)),
+        vol.Optional("entity_ids"): [str],
+    }
+)
+@websocket_api.require_admin
+@websocket_api.async_response
+@_with_entry
+async def ws_airco(hass, connection, msg, entry: HaClimateConfigEntry) -> None:
+    """Control the aircos of a room (separate from the floor heating)."""
+    coordinator = entry.runtime_data
+    if (room := _room_or_error(connection, msg, coordinator)) is None:
+        return
+    if "mode" not in msg and "temperature" not in msg:
+        connection.send_error(msg["id"], "invalid", "Geef een modus of temperatuur op")
+        return
+    try:
+        await coordinator.async_airco(
+            room, msg.get("mode"), msg.get("temperature"), msg.get("entity_ids")
+        )
+    except HomeAssistantError as err:
+        connection.send_error(msg["id"], "failed", str(err))
+        return
+    connection.send_result(msg["id"], {})
+
+
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): "ha_climate/baseline/freeze",
+        vol.Optional("entry_id"): str,
+        vol.Required("freeze"): bool,
+        vol.Optional("savings_start"): vol.Any(None, "", _date),
+    }
+)
+@websocket_api.require_admin
+@websocket_api.async_response
+@_with_entry
+async def ws_freeze_baseline(hass, connection, msg, entry: HaClimateConfigEntry) -> None:
+    """Freeze/unfreeze the baseline and optionally set the savings start date."""
+    coordinator = entry.runtime_data
+    try:
+        coordinator.freeze_baseline(msg["freeze"])
+    except HomeAssistantError as err:
+        connection.send_error(msg["id"], "failed", str(err))
+        return
+    if "savings_start" in msg:
+        options = dict(entry.options)
+        if msg["savings_start"]:
+            options[CONF_SAVINGS_START] = msg["savings_start"]
+        else:
+            options.pop(CONF_SAVINGS_START, None)
+        if options != dict(entry.options):
+            coordinator = await _async_update_options(hass, entry, options)
+    await coordinator.async_recalculate_baseline()
+    await coordinator.async_refresh()
+    connection.send_result(msg["id"], {"baseline": coordinator.baseline_info()})

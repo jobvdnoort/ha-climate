@@ -14,6 +14,9 @@ CONF_GAS_SENSOR: Final = "gas_sensor"
 CONF_GAS_PRICE: Final = "gas_price"
 CONF_GAS_PRICE_ENTITY: Final = "gas_price_entity"
 CONF_GAS_FIXED_COSTS: Final = "gas_fixed_costs"
+CONF_GAS_FIXED_COSTS_UNIT: Final = "gas_fixed_costs_unit"  # "month" or "day"
+CONF_SAVINGS_START: Final = "savings_start"
+CONF_DD_INDOOR_CORRECTION: Final = "degree_day_indoor_correction"
 CONF_HEATING_LIMIT: Final = "heating_limit"
 CONF_BASELINE_DAYS: Final = "baseline_days"
 
@@ -25,6 +28,7 @@ CONF_ROOMS: Final = "rooms"
 CONF_ROOM_ID: Final = "id"
 CONF_ROOM_NAME: Final = "name"
 CONF_ROOM_CLIMATES: Final = "climates"
+CONF_ROOM_AIRCOS: Final = "aircos"
 CONF_ROOM_USE_GLOBAL: Final = "use_global_night"
 CONF_ROOM_SELECT: Final = "room"
 CONF_DAY_TEMP: Final = "day_temp"
@@ -45,6 +49,12 @@ DEFAULT_NIGHT_END: Final = "06:30:00"
 DEFAULT_NIGHT_OFFSET: Final = -2.0
 DEFAULT_FIREPLACE_THRESHOLD: Final = 0.5
 DEFAULT_COMFORT_TIME: Final = "07:00:00"
+DEFAULT_FIXED_COSTS_UNIT: Final = "month"
+# Share of time heating is evaluated over this period for the room ranking.
+RANKING_DAYS: Final = 7
+MAX_EVENTS: Final = 2000
+AIRCO_ACTIVE_ACTIONS: Final = frozenset({"heating", "cooling", "preheating"})
+AIRCO_DEFAULT_COOL_TEMP: Final = 22.0
 # Used for the euro savings when no gas price is configured (NL 2026, incl. taxes).
 DEFAULT_GAS_PRICE: Final = 1.40
 

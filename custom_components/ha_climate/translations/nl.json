@@ -11,12 +11,15 @@
           "gas_price_entity": "Gasprijs-entiteit (optioneel)",
           "heating_limit": "Stookgrens",
           "baseline_days": "Historie voor baseline (dagen, 0 = alles)",
-          "gas_fixed_costs": "Vaste leveringskosten (€/dag)"
+          "gas_fixed_costs": "Vaste leveringskosten",
+          "gas_fixed_costs_unit": "Eenheid vaste kosten",
+          "degree_day_indoor_correction": "Graaddagen corrigeren voor binnentemperatuur"
         },
         "data_description": {
           "heating_limit": "Graaddagen = max(0, stookgrens − gemiddelde buitentemperatuur). Standaard 18 °C.",
           "baseline_days": "0 = alle dagen vanaf het eerste moment dat beide sensoren data hebben.",
-          "gas_fixed_costs": "Optioneel, wordt bij de totale gaskosten per dag opgeteld (niet bij de besparing)."
+          "gas_fixed_costs": "Optioneel (vastrecht, netbeheer). Een maandbedrag wordt omgerekend naar dagkosten (÷ 30,4375) en telt mee in de totale gaskosten, niet in de besparing.",
+          "degree_day_indoor_correction": "Verschuift de stookgrens met het verschil tussen de gemiddelde ingestelde binnentemperatuur en 20 °C."
         }
       },
       "night": {
@@ -38,7 +41,8 @@
       "name_exists": "Er bestaat al een ruimte met deze naam.",
       "climates_required": "Kies minimaal één vloerverwarmingslus.",
       "climate_in_use": "Een van deze lussen is al aan een andere ruimte gekoppeld.",
-      "night_above_day": "De nachttemperatuur moet lager zijn dan de dagtemperatuur."
+      "night_above_day": "De nachttemperatuur moet lager zijn dan de dagtemperatuur.",
+      "airco_in_use": "Een airco is al als lus of in een andere kamer gekoppeld."
     },
     "abort": {
       "already_configured": "Deze gassensor is al geconfigureerd."
@@ -68,12 +72,15 @@
           "gas_price_entity": "Gasprijs-entiteit (optioneel)",
           "heating_limit": "Stookgrens",
           "baseline_days": "Historie voor baseline (dagen, 0 = alles)",
-          "gas_fixed_costs": "Vaste leveringskosten (€/dag)"
+          "gas_fixed_costs": "Vaste leveringskosten",
+          "gas_fixed_costs_unit": "Eenheid vaste kosten",
+          "degree_day_indoor_correction": "Graaddagen corrigeren voor binnentemperatuur"
         },
         "data_description": {
           "heating_limit": "Graaddagen = max(0, stookgrens − gemiddelde buitentemperatuur). Standaard 18 °C.",
           "baseline_days": "0 = alle dagen vanaf het eerste moment dat beide sensoren data hebben.",
-          "gas_fixed_costs": "Optioneel, wordt bij de totale gaskosten per dag opgeteld (niet bij de besparing)."
+          "gas_fixed_costs": "Optioneel (vastrecht, netbeheer). Een maandbedrag wordt omgerekend naar dagkosten (÷ 30,4375) en telt mee in de totale gaskosten, niet in de besparing.",
+          "degree_day_indoor_correction": "Verschuift de stookgrens met het verschil tussen de gemiddelde ingestelde binnentemperatuur en 20 °C."
         }
       },
       "night": {
@@ -101,12 +108,14 @@
           "day_temp": "Dagtemperatuur (optioneel)",
           "night_temp": "Vaste nachttemperatuur (optioneel)",
           "comfort_time": "Op temperatuur om",
-          "optimum_start": "Optimum start"
+          "optimum_start": "Optimum start",
+          "aircos": "Airco's (koelen / snel bijverwarmen)"
         },
         "data_description": {
           "use_global_night": "Uitzetten om hieronder eigen tijden en verlaging voor deze ruimte te gebruiken.",
           "night_temp": "Indien ingevuld wordt deze temperatuur 's nachts ingesteld in plaats van de relatieve verlaging.",
-          "optimum_start": "Start de verwarming automatisch op basis van het geleerde thermische model, zodat de kamer om de ingestelde tijd op dagtemperatuur is."
+          "optimum_start": "Start de verwarming automatisch op basis van het geleerde thermische model, zodat de kamer om de ingestelde tijd op dagtemperatuur is.",
+          "aircos": "Optioneel. Airco's doen niet mee met nachtverlaging, schema's of optimum start; periodes waarin een airco verwarmt of koelt worden uitgesloten van het vloerverwarmingsmodel."
         }
       },
       "room": {
@@ -122,12 +131,14 @@
           "day_temp": "Dagtemperatuur (optioneel)",
           "night_temp": "Vaste nachttemperatuur (optioneel)",
           "comfort_time": "Op temperatuur om",
-          "optimum_start": "Optimum start"
+          "optimum_start": "Optimum start",
+          "aircos": "Airco's (koelen / snel bijverwarmen)"
         },
         "data_description": {
           "use_global_night": "Uitzetten om hieronder eigen tijden en verlaging voor deze ruimte te gebruiken.",
           "night_temp": "Indien ingevuld wordt deze temperatuur 's nachts ingesteld in plaats van de relatieve verlaging.",
-          "optimum_start": "Start de verwarming automatisch op basis van het geleerde thermische model, zodat de kamer om de ingestelde tijd op dagtemperatuur is."
+          "optimum_start": "Start de verwarming automatisch op basis van het geleerde thermische model, zodat de kamer om de ingestelde tijd op dagtemperatuur is.",
+          "aircos": "Optioneel. Airco's doen niet mee met nachtverlaging, schema's of optimum start; periodes waarin een airco verwarmt of koelt worden uitgesloten van het vloerverwarmingsmodel."
         }
       },
       "edit_room": {
@@ -163,7 +174,8 @@
       "name_exists": "Er bestaat al een ruimte met deze naam.",
       "climates_required": "Kies minimaal één vloerverwarmingslus.",
       "climate_in_use": "Een van deze lussen is al aan een andere ruimte gekoppeld.",
-      "night_above_day": "De nachttemperatuur moet lager zijn dan de dagtemperatuur."
+      "night_above_day": "De nachttemperatuur moet lager zijn dan de dagtemperatuur.",
+      "airco_in_use": "Een airco is al als lus of in een andere kamer gekoppeld."
     }
   },
   "entity": {
@@ -260,6 +272,14 @@
   "exceptions": {
     "no_entry": {
       "message": "Geen geladen HA Climate-configuratie gevonden."
+    }
+  },
+  "selector": {
+    "fixed_costs_unit": {
+      "options": {
+        "month": "Per maand (€/maand)",
+        "day": "Per dag (€/dag)"
+      }
     }
   }
 }

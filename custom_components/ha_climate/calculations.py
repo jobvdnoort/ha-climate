@@ -88,6 +88,7 @@ def calculate_baseline(
     setback_days: Iterable[date] = (),
     min_degree_days: float = 1.0,
     min_days: int = 7,
+    limits: dict[date, float] | None = None,
 ) -> BaselineResult:
     """Calculate the average gas usage in m³ per degree day.
 
@@ -101,6 +102,7 @@ def calculate_baseline(
     * there were fewer than ``min_degree_days`` degree days (non-heating days).
 
     The result is marked ``reliable`` when at least ``min_days`` days were used.
+    ``limits`` optionally overrides the heating limit per day (indoor correction).
     """
     fireplace = set(fireplace_days)
     setback = set(setback_days)
@@ -116,7 +118,8 @@ def calculate_baseline(
         if record.day in setback:
             result.excluded_setback += 1
             continue
-        dd = degree_days(record.mean_temperature, heating_limit)
+        limit = (limits or {}).get(record.day, heating_limit)
+        dd = degree_days(record.mean_temperature, limit)
         assert dd is not None
         if dd < min_degree_days:
             result.excluded_warm += 1
@@ -299,3 +302,121 @@ def fireplace_excluded_days(minutes_per_day: dict[str, int], min_minutes: int) -
         for day, minutes in minutes_per_day.items()
         if minutes >= min_minutes
     }
+
+
+# ---------------------------------------------------------------------------
+# Costs
+# ---------------------------------------------------------------------------
+DAYS_PER_MONTH = 30.4375  # 365.25 / 12
+
+
+def daily_fixed_costs(amount: float | None, unit: str = "month") -> float:
+    """Convert fixed delivery costs to € per day (``unit`` is "month" or "day")."""
+    if not amount:
+        return 0.0
+    return amount / DAYS_PER_MONTH if unit == "month" else amount
+
+
+# ---------------------------------------------------------------------------
+# Indoor temperature correction
+# ---------------------------------------------------------------------------
+REFERENCE_INDOOR_TEMPERATURE = 20.0
+
+
+def corrected_heating_limit(
+    heating_limit: float,
+    mean_target: float | None,
+    reference: float = REFERENCE_INDOOR_TEMPERATURE,
+) -> float:
+    """Shift the heating limit by the deviation of the indoor target from 20 °C.
+
+    The usual 18 °C heating limit assumes ~20 °C inside (internal gains cover
+    the last 2 °C). A house kept at 21 °C starts heating at ~19 °C outside, a
+    house kept at 19 °C at ~17 °C.
+    """
+    if mean_target is None:
+        return heating_limit
+    return heating_limit + (mean_target - reference)
+
+
+# ---------------------------------------------------------------------------
+# Room ranking
+# ---------------------------------------------------------------------------
+HIGH_HEAT_LOSS = 0.06  # 1/h  (°C/h per °C ΔT)
+MEDIUM_HEAT_LOSS = 0.035
+HIGH_DUTY = 0.5
+MEDIUM_DUTY = 0.25
+
+
+@dataclass(slots=True)
+class RoomRanking:
+    """Energy ranking of one room."""
+
+    room_id: str
+    heat_loss: float | None  # normalized heat loss k, 1/h
+    duty: float | None  # 0..1 share of time actively heating
+    score: float | None  # 0..1, higher = less efficient
+    label: str
+    tags: list[str]
+    rank: int = 0
+
+
+def rank_rooms(rooms: list[tuple[str, float | None, float | None]]) -> list[RoomRanking]:
+    """Rank rooms from least to most efficient.
+
+    ``rooms`` holds (room_id, heat_loss, duty). The score averages both values,
+    each relative to the highest value among the rooms, so the room that loses
+    heat fastest *and* heats most often ends on top.
+    """
+    max_k = max((k for _, k, _ in rooms if k), default=0.0)
+    max_duty = max((d for _, _, d in rooms if d), default=0.0)
+    result: list[RoomRanking] = []
+    for room_id, k, duty in rooms:
+        parts = []
+        if k is not None and max_k > 0:
+            parts.append(k / max_k)
+        if duty is not None and max_duty > 0:
+            parts.append(duty / max_duty)
+        score = sum(parts) / len(parts) if parts else None
+        tags: list[str] = []
+        if k is None and duty is None:
+            label = "Onvoldoende data"
+        elif k is not None and k >= HIGH_HEAT_LOSS:
+            label = "Hoog warmteverlies"
+        elif duty is not None and duty >= HIGH_DUTY:
+            label = "Stookt veel"
+        elif (k is not None and k >= MEDIUM_HEAT_LOSS) or (
+            duty is not None and duty >= MEDIUM_DUTY
+        ):
+            label = "Gemiddeld"
+        else:
+            label = "Zuinig"
+        if k is not None and k >= HIGH_HEAT_LOSS:
+            tags.append("hoog warmteverlies")
+        if duty is not None and duty >= HIGH_DUTY:
+            tags.append("stookt veel")
+        result.append(RoomRanking(room_id, k, duty, score, label, tags))
+    result.sort(key=lambda r: (r.score is None, -(r.score or 0.0)))
+    for position, ranking in enumerate(result, start=1):
+        ranking.rank = position
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Event texts
+# ---------------------------------------------------------------------------
+def format_number(value: float, digits: int = 1) -> str:
+    """Dutch number formatting (decimal comma)."""
+    return f"{value:.{digits}f}".replace(".", ",")
+
+
+def describe_night(
+    start: str, end: str, offset: float | None = None, night_temp: float | None = None
+) -> str:
+    """Return e.g. ``-1,5 °C, 21:30–06:00`` or ``16,0 °C, 22:00–06:30``."""
+    amount = (
+        f"{format_number(night_temp)} °C"
+        if night_temp is not None
+        else f"{format_number(offset if offset is not None else 0.0)} °C"
+    )
+    return f"{amount}, {start[:5]}–{end[:5]}"

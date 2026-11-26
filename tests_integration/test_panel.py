@@ -96,6 +96,13 @@ async def test_panel_and_websocket(hass, ha_climate_enabled, hass_ws_client) -> 
     assert hass.states.get("switch.ha_climate_night_setback_woonkamer_en_keuken").state == "on"
     assert hass.states.get("sensor.ha_climate_model_confidence_woonkamer_en_keuken") is not None
 
+    # Saving without changes returns right away (no reload to wait for).
+    await client.send_json_auto_id(
+        {"type": "ha_climate/room/save", "room": {"id": room_id, "name": "Woonkamer en keuken"}}
+    )
+    msg = await client.receive_json()
+    assert msg["success"], msg
+
     # Duplicate loop in another room is refused.
     await client.send_json_auto_id(
         {"type": "ha_climate/room/save", "room": {"name": "Keuken", "climates": ["climate.kitchen"]}}
