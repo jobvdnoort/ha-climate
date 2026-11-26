@@ -34,5 +34,4 @@ class RecalculateBaselineButton(HaClimateEntity, ButtonEntity):
 
     async def async_press(self) -> None:
         """Handle the button press."""
-        await self.coordinator.async_recalculate_baseline()
-        await self.coordinator.async_request_refresh()
+        await self.coordinator.async_recalculate()

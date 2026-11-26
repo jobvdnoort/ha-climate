@@ -11,7 +11,12 @@ from homeassistant.exceptions import ServiceValidationError
 from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers.typing import ConfigType
 
-from .const import ATTR_CONFIG_ENTRY_ID, DOMAIN, SERVICE_RECALCULATE_BASELINE
+from .const import (
+    ATTR_CONFIG_ENTRY_ID,
+    CONF_BASELINE_DAYS,
+    DOMAIN,
+    SERVICE_RECALCULATE_BASELINE,
+)
 from .coordinator import HaClimateConfigEntry, HaClimateCoordinator, async_restore_all
 from .panel import async_register_panel, async_unregister_panel
 from .websocket_api import async_register_websocket_api
@@ -47,11 +52,15 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
         response = {}
         for entry in entries:
             coordinator = entry.runtime_data
-            result = await coordinator.async_recalculate_baseline()
-            await coordinator.async_request_refresh()
+            result = await coordinator.async_recalculate()
             response[entry.entry_id] = {
                 "m3_per_degree_day": result.m3_per_degree_day if result else None,
                 "days_used": result.days_used if result else 0,
+                "baseline": coordinator.baseline_info(),
+                "rooms": {
+                    room["name"]: coordinator.model_status(room["id"])["data_points"]
+                    for room in coordinator.rooms
+                },
             }
         return response
 
@@ -62,6 +71,21 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
         schema=SERVICE_SCHEMA,
         supports_response=SupportsResponse.OPTIONAL,
     )
+    return True
+
+
+async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
+    """Migrate old config entries."""
+    if entry.version == 1 and entry.minor_version < 2:
+        # 1.2: the baseline uses all history since both sensors have data
+        # (0 days); 365 was the old default and is replaced by "all".
+        data, options = dict(entry.data), dict(entry.options)
+        for values in (data, options):
+            if values.get(CONF_BASELINE_DAYS) == 365:
+                values[CONF_BASELINE_DAYS] = 0
+        hass.config_entries.async_update_entry(
+            entry, data=data, options=options, minor_version=2
+        )
     return True
 
 

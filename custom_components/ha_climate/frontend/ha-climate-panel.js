@@ -29,6 +29,7 @@ const COLORS = {
   degreeDays: "#ab47bc",
   saved: "#66bb6a",
   savedEur: "#26a69a",
+  cost: "#8d6e63",
   cooling: "#42a5f5",
   heating: "#ef5350",
 };
@@ -61,6 +62,17 @@ const timeOf = (iso) => {
 const dayLabel = (iso) => {
   const d = new Date(`${iso}T12:00:00`);
   return d.toLocaleDateString("nl-NL", { day: "numeric", month: "short" });
+};
+
+const dateLabel = (iso) => {
+  if (!iso) return "–";
+  const d = iso.length <= 10 ? new Date(`${iso}T12:00:00`) : new Date(iso);
+  const opts = { day: "numeric", month: "short", year: "numeric" };
+  try {
+    return d.toLocaleDateString("nl-NL", iso.length > 10 && SERVER_TZ ? { ...opts, timeZone: SERVER_TZ } : opts);
+  } catch (err) {
+    return d.toLocaleDateString("nl-NL", opts);
+  }
 };
 
 const hhmm = (value, fallback = "") => (value ? String(value).slice(0, 5) : fallback);
@@ -386,30 +398,45 @@ class HaClimatePanel extends HTMLElement {
     const s = this._state;
     const b = s.baseline;
     const e = s.energy || {};
+    const rows = this._history || [];
     const periods = [14, 30, 60, 90, 365]
       .map((d) => `<button class="seg ${d === this._days ? "active" : ""}" data-action="days" data-days="${d}">${d} d</button>`)
       .join("");
-    const roomRows = s.rooms
-      .map(
-        (r) => `<tr>
-          <td>${esc(r.name)}</td>
-          <td>${fmt(r.model.cooling_rate, 2, "°C/u")}<br><small class="muted">k = ${fmt(r.model.cooling_coefficient, 4)} /u</small></td>
-          <td>${fmt(r.model.heating_rate, 2, "°C/u")}<br><small class="muted">h = ${fmt(r.model.heating_power, 2)} °C/u</small></td>
-          <td>${this._confidenceBar(r.model.confidence)}<br><small class="muted">afk. ${fmt(r.model.cooling_confidence, 0)}% · opw. ${fmt(r.model.heating_confidence, 0)}% · ${r.model.observations} metingen</small></td>
-          <td>${this._admin ? `<button class="btn text small" data-action="reset-model" data-room="${r.id}">Reset</button>` : ""}</td>
-        </tr>`
-      )
-      .join("");
+    const sum = (key) => rows.reduce((acc, r) => acc + (r[key] ?? 0), 0);
+    const costDays = rows.filter((r) => r.cost !== null && r.cost !== undefined).length;
+    const periodCost = sum("cost");
+    const periodVariable = sum("cost_variable");
+    const periodGas = sum("gas");
+    const periodSaved = sum("saved");
+    const fixed = e.fixed_costs ?? 0;
+    const costTile = (title, total, gas, days) => `
+      <div class="card stat"><div class="muted">${title}</div><div class="big">${euro(total)}</div>
+        <div class="muted small">${gas !== null && gas !== undefined ? `${fmt(gas, 2, "m³")} × ${euro(e.gas_price)}` : "geen gasdata"}${fixed ? ` + ${euro(fixed * (days ?? 1))} vast` : ""}</div></div>`;
+    const baselineFrom = b.first_day ? dateLabel(b.first_day) : "–";
+    const excluded = [
+      b.excluded_fireplace ? `${b.excluded_fireplace} openhaard` : "",
+      b.excluded_setback ? `${b.excluded_setback} nachtverlaging` : "",
+      b.excluded_warm ? `${b.excluded_warm} warm (&lt; 1 graaddag)` : "",
+      b.excluded_invalid ? `${b.excluded_invalid} onvolledig` : "",
+    ].filter(Boolean).join(", ");
     return `
       <div class="summary">
         <div class="card stat"><div class="muted">Baseline</div><div class="big">${fmt(b.m3_per_degree_day, 3)}<small>m³/gd</small></div>
-          <div class="muted small">${b.days_used} dagen${b.reliable ? "" : " · nog onbetrouwbaar"}</div></div>
-        <div class="card stat"><div class="muted">Gas vandaag</div><div class="big">${fmt(e.gas_today, 2)}<small>m³</small></div>
-          <div class="muted small">verwacht ${fmt(e.expected_today, 2)} m³</div></div>
-        <div class="card stat"><div class="muted">Bespaard gisteren</div><div class="big">${fmt(e.saved_yesterday, 2)}<small>m³</small></div>
-          <div class="muted small">${euro(e.saved_yesterday === null || e.saved_yesterday === undefined ? null : e.saved_yesterday * e.gas_price)}</div></div>
-        <div class="card stat"><div class="muted">Gasprijs</div><div class="big">${euro(e.gas_price)}</div>
-          <div class="muted small">${esc(e.gas_price_source || "")}</div></div>
+          <div class="muted small">${b.days_used} dagen${b.first_day ? ` vanaf ${baselineFrom}` : ""}${b.reliable ? "" : " · nog onbetrouwbaar"}</div></div>
+        ${costTile("Gaskosten vandaag", e.cost_today, e.gas_today, 1)}
+        ${costTile("Gaskosten gisteren", e.cost_yesterday, e.gas_yesterday, 1)}
+        <div class="card stat"><div class="muted">Gaskosten periode (${this._days} d)</div><div class="big">${rows.length ? euro(periodCost) : "–"}</div>
+          <div class="muted small">${rows.length ? `${euro(periodVariable)} variabel + ${euro(fixed * costDays)} vast · ${fmt(periodGas, 1, "m³")}` : "laden…"}</div></div>
+      </div>
+      <div class="summary">
+        <div class="card stat"><div class="muted">Bespaard vandaag</div><div class="mid">${fmt(e.saved_today, 2)}<small>m³</small></div>
+          <div class="muted small">${euro(e.saved_today === null || e.saved_today === undefined ? null : e.saved_today * e.gas_price)} variabel</div></div>
+        <div class="card stat"><div class="muted">Bespaard gisteren</div><div class="mid">${fmt(e.saved_yesterday, 2)}<small>m³</small></div>
+          <div class="muted small">${euro(e.saved_yesterday === null || e.saved_yesterday === undefined ? null : e.saved_yesterday * e.gas_price)} variabel</div></div>
+        <div class="card stat"><div class="muted">Bespaard periode</div><div class="mid">${rows.length ? fmt(periodSaved, 1) : "–"}<small>m³</small></div>
+          <div class="muted small">${rows.length ? euro(periodSaved * e.gas_price) : ""} variabel</div></div>
+        <div class="card stat"><div class="muted">Gasprijs</div><div class="mid">${euro(e.gas_price)}<small>/m³</small></div>
+          <div class="muted small">${esc(e.gas_price_source || "")}${fixed ? ` · vast ${euro(fixed)}/dag` : ""}</div></div>
       </div>
       <div class="bar"><div class="segmented">${periods}</div><div class="spacer"></div>
         ${this._admin ? '<button class="btn text" data-action="recalculate">Baseline herberekenen</button>' : ""}</div>
@@ -421,24 +448,99 @@ class HaClimatePanel extends HTMLElement {
           <span><i class="line" style="background:${COLORS.degreeDays}"></i>Graaddagen</span>
         </div>
         <div class="chart" id="chart-gas"></div>
+        <p class="muted small">
+          <b>Baseline:</b> ${fmt(b.m3_per_degree_day, 3, "m³ per graaddag")} berekend over <b>${b.days_used} dagen</b>
+          ${b.first_day ? `van ${dateLabel(b.first_day)} t/m ${dateLabel(b.last_day)}` : ""}.
+          ${b.overlap_start ? `Beide sensoren hebben data vanaf <b>${dateLabel(b.overlap_start)}</b>; ` : ""}${b.days_stored ? `${b.days_stored} dagen permanent opgeslagen.` : ""}
+          ${excluded ? `Overgeslagen: ${excluded}.` : ""}
+          ${b.updated ? `Laatst berekend ${dateLabel(b.updated)} ${timeOf(b.updated)}.` : ""}
+        </p>
       </div>
       <div class="card">
-        <div class="card-head"><h3>Cumulatieve gasbesparing</h3>
+        <div class="card-head"><h3>Cumulatieve gasbesparing (variabel)</h3>
           <div class="segmented small">
             <button class="seg ${this._chartUnit === "m3" ? "active" : ""}" data-action="unit" data-unit="m3">m³</button>
             <button class="seg ${this._chartUnit === "eur" ? "active" : ""}" data-action="unit" data-unit="eur">€</button>
           </div></div>
         <div class="chart" id="chart-savings"></div>
-        <p class="muted small">Besparing = verwacht (baseline × graaddagen) − werkelijk, opgeteld over de gekozen periode. Dagen met nachtverlaging zijn gemarkeerd.</p>
+        <p class="muted small">Besparing = verwacht (baseline × graaddagen) − werkelijk, opgeteld over de gekozen periode en omgerekend met de variabele gasprijs (vaste leveringskosten tellen niet mee). Dagen met nachtverlaging zijn gemarkeerd.</p>
       </div>
+      ${this._renderModelSection()}`;
+  }
+
+  _renderModelSection() {
+    const rooms = this._state.rooms;
+    if (!rooms.length) {
+      return `<div class="card"><h3>Thermisch model per kamer</h3><p class="muted">Nog geen kamers.</p></div>`;
+    }
+    if (!rooms.some((r) => r.id === this._room)) this._room = rooms[0].id;
+    const room = rooms.find((r) => r.id === this._room);
+    const m = room.model;
+    const st = room.model_status;
+    const stage = st.stage;
+    const steps = [
+      ["Data verzamelen", "Meetblokken van 2 uur uit historie en live metingen"],
+      ["Kamer leren", "Afkoel- en opwarmgedrag worden geschat"],
+      ["Voorspellend regelen", "Optimum start gebruikt het geleerde model"],
+    ]
+      .map(([title, text], i) => {
+        const n = i + 1;
+        const cls = n < stage ? "done" : n === stage ? "current" : "";
+        return `<div class="step ${cls}"><div class="step-dot">${n < stage ? "✓" : n}</div>
+          <div><div class="step-title">${title}</div><div class="muted small">${text}</div></div></div>`;
+      })
+      .join('<div class="step-line"></div>');
+    const backfill = st.backfill || {};
+    const tau = st.time_constant;
+    const select = rooms
+      .map((r) => `<option value="${esc(r.id)}" ${r.id === room.id ? "selected" : ""}>${esc(r.name)}</option>`)
+      .join("");
+    return `
       <div class="card">
-        <h3>Thermisch model per kamer</h3>
+        <div class="card-head"><h3>Thermisch model per kamer</h3>
+          <select class="room-select" data-action="room-select">${select}</select></div>
+        <div class="model-status">
+          <div class="model-head">
+            <div>
+              <div class="muted small">Model status</div>
+              <div class="big">${fmt(st.confidence, 0)}<small>%</small></div>
+              <div class="muted small">confidence · afkoelen ${fmt(st.cooling_confidence, 0)}% · opwarmen ${fmt(st.heating_confidence, 0)}%</div>
+            </div>
+            <div>
+              <div class="muted small">Data points</div>
+              <div class="big">${st.data_points}</div>
+              <div class="muted small">${st.from_history} uit historie · ${st.from_live} live</div>
+            </div>
+          </div>
+          <div class="steps">${steps}</div>
+          <div class="tiles">
+            <div class="tile">
+              <div class="muted small">Afkoelsnelheid / warmteverlies</div>
+              <div class="mid">${fmt(m.cooling_rate, 2)}<small>°C/u</small></div>
+              <div class="muted small">bij ΔT ${fmt(m.delta_t, 1, "°C")} · ${fmt(st.cooling_coefficient, 4)} °C/u per °C</div>
+            </div>
+            <div class="tile">
+              <div class="muted small">Opwarmsnelheid</div>
+              <div class="mid">${fmt(m.heating_rate, 2)}<small>°C/u</small></div>
+              <div class="muted small">netto bij volle verwarming · bruto ${fmt(st.heating_power, 2)} °C/u</div>
+            </div>
+            <div class="tile">
+              <div class="muted small">Tijdconstante</div>
+              <div class="mid">${tau ? fmt(tau, tau >= 100 ? 0 : 1) : "–"}<small>uur</small></div>
+              <div class="muted small">τ = 1/k: hoe traag de kamer reageert</div>
+            </div>
+          </div>
+          <p class="muted small">
+            ${st.first ? `Data vanaf <b>${dateLabel(st.first)}</b> t/m ${dateLabel(st.last)}: <b>${st.data_points} meetpunten</b> over <b>${st.days} dagen</b>
+              (${st.heating_points} met verwarming, ${st.cooling_points} afkoelend in de fit).`
+              : st.data_points ? `${st.data_points} meetpunten uit een eerdere versie (zonder datum); nieuwe meetpunten krijgen een tijdstempel.` : "Nog geen meetpunten."}
+            ${st.fit_points !== st.data_points && st.fit_first ? ` De fit gebruikt de laatste ${st.fit_points} meetpunten vanaf ${dateLabel(st.fit_first)} (meest recente seizoen).` : ""}
+            ${backfill.analysed_at ? `<br>Recorder-historie ${backfill.start ? `vanaf ${dateLabel(backfill.start)} ${timeOf(backfill.start)}` : "(geen bruikbare historie)"} geanalyseerd op ${dateLabel(backfill.analysed_at)} ${timeOf(backfill.analysed_at)}: ${backfill.windows ?? 0} meetblokken, ${backfill.new ?? 0} nieuw.` : ""}
+          </p>
+          ${this._admin ? `<div class="actions"><button class="btn text small danger" data-action="reset-model" data-room="${room.id}">Model resetten</button></div>` : ""}
+        </div>
+        <h3 class="sub">Vergelijking kamers</h3>
         <div class="chart" id="chart-rooms"></div>
-        <div class="table-wrap"><table>
-          <thead><tr><th>Kamer</th><th>Afkoelsnelheid (nu)</th><th>Opwarmsnelheid (nu)</th><th>Betrouwbaarheid</th><th></th></tr></thead>
-          <tbody>${roomRows || '<tr><td colspan="5" class="muted">Nog geen kamers.</td></tr>'}</tbody>
-        </table></div>
-        <p class="muted small">Het model leert continu: afkoelen ≈ k × (binnen − buiten), opwarmen ≈ h − k × ΔT bij volle verwarming. De betrouwbaarheid groeit met het aantal meetmomenten (elk 2 uur) en daalt bij veel spreiding.</p>
       </div>`;
   }
 
@@ -464,6 +566,7 @@ class HaClimatePanel extends HTMLElement {
           { name: "Werkelijk gas", type: "bar", axis: "left", color: COLORS.gas, values: rows.map((r) => r.gas), unit: "m³", digits: 2 },
           { name: "Verwacht gas", type: "line", axis: "left", color: COLORS.expected, values: rows.map((r) => r.expected), unit: "m³", digits: 2 },
           { name: "Graaddagen", type: "line", axis: "right", color: COLORS.degreeDays, values: rows.map((r) => r.degree_days), unit: "gd", digits: 1, dashed: true },
+          { name: "Gaskosten", type: "tooltip", axis: "left", color: COLORS.cost, values: rows.map((r) => r.cost), unit: "€" },
         ],
       });
       const savEl = root.getElementById("chart-savings");
@@ -572,14 +675,16 @@ class HaClimatePanel extends HTMLElement {
           <label class="field"><span>Buitentemperatuur-sensor</span><select name="outdoor_sensor" ${dis}>${this._options(temps, st.outdoor_sensor)}</select></label>
           <label class="field"><span>Gasverbruik-sensor (m³)</span><select name="gas_sensor" ${dis}>${this._options(gas, st.gas_sensor)}</select></label>
           <label class="field"><span>Stookgrens (°C)</span><input name="heating_limit" type="number" step="0.5" min="10" max="25" value="${st.heating_limit}" ${dis}></label>
-          <label class="field"><span>Historie voor baseline (dagen)</span><input name="baseline_days" type="number" step="1" min="14" max="1095" value="${st.baseline_days}" ${dis}></label>
+          <label class="field"><span>Baseline-periode (dagen, 0 = alles)</span><input name="baseline_days" type="number" step="1" min="0" max="3650" value="${st.baseline_days}" ${dis}></label>
         </div>
         <h3>Gasprijs</h3>
         <div class="form-grid">
           <label class="field"><span>Vaste gasprijs (€/m³)</span><input name="gas_price" type="number" step="0.0001" min="0" max="10" value="${st.gas_price ?? ""}" placeholder="standaard ${fmt(this._state.defaults.gas_price, 2)}" ${dis}></label>
           <label class="field"><span>Of: gasprijs-entiteit</span><select name="gas_price_entity" ${dis}>${this._options(prices, st.gas_price_entity, true)}</select></label>
+          <label class="field"><span>Vaste leveringskosten (€/dag)</span><input name="gas_fixed_costs" type="number" step="0.0001" min="0" max="10" value="${st.gas_fixed_costs ?? 0}" placeholder="0,00" ${dis}></label>
         </div>
-        <p class="muted small">Een entiteit gaat voor op de vaste prijs. Zonder prijs wordt ${euro(this._state.defaults.gas_price)} per m³ gebruikt.</p>
+        <p class="muted small">Een entiteit gaat voor op de vaste prijs. Zonder prijs wordt ${euro(this._state.defaults.gas_price)} per m³ gebruikt.
+          Vaste leveringskosten (vastrecht, netbeheer) tellen mee in de totale gaskosten, niet in de besparing.</p>
         <h3>Nachtverlaging (algemeen)</h3>
         <div class="form-grid">
           <label class="field"><span>Start</span><input name="night_start" type="time" value="${hhmm(st.night_start)}" ${dis}></label>
@@ -608,13 +713,13 @@ class HaClimatePanel extends HTMLElement {
         if (this._tab === "analytics") {
           this._history = null;
           await this._loadHistory();
-          this._renderCharts();
+          this._render();
         }
       })
     );
     root.querySelectorAll("[data-action]").forEach((el) => {
       const action = el.dataset.action;
-      const event = el.tagName === "INPUT" ? "change" : "click";
+      const event = el.tagName === "INPUT" || el.tagName === "SELECT" ? "change" : "click";
       el.addEventListener(event, (ev) => this._onAction(action, el, ev));
     });
     root.querySelectorAll("form").forEach((form) => {
@@ -706,12 +811,16 @@ class HaClimatePanel extends HTMLElement {
         this._history = null;
         this._render();
         await this._loadHistory();
-        this._renderCharts();
+        this._render();
         break;
       case "unit":
         this._chartUnit = el.dataset.unit;
         this.shadowRoot.querySelectorAll('[data-action="unit"]').forEach((b) => b.classList.toggle("active", b === el));
         this._renderCharts();
+        break;
+      case "room-select":
+        this._room = el.value;
+        this._render();
         break;
       case "reset-model": {
         const room = s.rooms.find((r) => r.id === el.dataset.room);
@@ -721,7 +830,10 @@ class HaClimatePanel extends HTMLElement {
         break;
       }
       case "recalculate":
-        await this._call({ type: "ha_climate/baseline/recalculate" }, "Baseline herberekend");
+        await this._call(
+          { type: "ha_climate/baseline/recalculate" },
+          "Baseline en kamermodellen herberekend uit de historie"
+        );
         break;
       default:
         break;
@@ -775,6 +887,7 @@ class HaClimatePanel extends HTMLElement {
       baseline_days: numOrNull(get("baseline_days")),
       gas_price: numOrNull(get("gas_price")),
       gas_price_entity: get("gas_price_entity") || null,
+      gas_fixed_costs: numOrNull(get("gas_fixed_costs")) ?? 0,
       night_start: get("night_start"),
       night_end: get("night_end"),
       night_offset: numOrNull(get("night_offset")),
@@ -818,7 +931,7 @@ function chart({ width, labels, series, marks = [], shade = [] }) {
   const n = labels.length;
   const step = innerW / Math.max(1, n);
   const axisRange = (axis) => {
-    const vals = series.filter((s) => s.axis === axis).flatMap((s) => s.values).filter((v) => v !== null && v !== undefined);
+    const vals = series.filter((s) => s.axis === axis && s.type !== "tooltip").flatMap((s) => s.values).filter((v) => v !== null && v !== undefined);
     if (!vals.length) return null;
     const min = Math.min(0, ...vals);
     const max = Math.max(0, ...vals);
@@ -827,6 +940,8 @@ function chart({ width, labels, series, marks = [], shade = [] }) {
     return { min: bottom, max: top === bottom ? bottom + 1 : top };
   };
   const ranges = { left: axisRange("left"), right: axisRange("right") };
+  const pad2 = series.some((s) => s.axis === "right" && s.type !== "tooltip");
+  if (!pad2) pad.right = 14;
   const y = (axis, v) => {
     const r = ranges[axis];
     return pad.top + innerH - ((v - r.min) / (r.max - r.min)) * innerH;
@@ -854,12 +969,19 @@ function chart({ width, labels, series, marks = [], shade = [] }) {
   if (ranges.left && ranges.left.min < 0) {
     svg += `<line x1="${pad.left}" x2="${w - pad.right}" y1="${y("left", 0)}" y2="${y("left", 0)}" class="zero"/>`;
   }
-  // x labels
-  const every = Math.ceil(n / Math.max(1, Math.floor(innerW / 60)));
+  // x labels: evenly spaced, the last one always shown (right aligned) and
+  // any label that would collide with it is dropped.
+  const labelW = 64;
+  const every = Math.max(1, Math.ceil(labelW / step));
+  const lastX = x(n - 1);
+  const lastWidth = Math.max(labelW, String(labels[n - 1] || "").length * 6.5);
   labels.forEach((label, i) => {
-    const last = i === n - 1 && (n - 1) % every >= every / 2;
-    if (i % every === 0 || last) {
+    const isLast = i === n - 1;
+    const regular = i % every === 0 && !isLast && x(i) + labelW / 2 < lastX - lastWidth - 4;
+    if (regular) {
       svg += `<text x="${x(i)}" y="${height - 12}" class="axis" text-anchor="middle">${esc(label)}</text>`;
+    } else if (isLast) {
+      svg += `<text x="${Math.min(w - pad.right, lastX + step / 2)}" y="${height - 12}" class="axis" text-anchor="end">${esc(label)}</text>`;
     }
     if (marks[i]) svg += `<text x="${x(i)}" y="${pad.top + 10}" text-anchor="middle" font-size="10">${marks[i]}</text>`;
   });
@@ -1070,10 +1192,25 @@ const STYLE = `
   }
   .tip-title { font-weight: 500; margin-bottom: 4px; }
   .table-wrap { overflow-x: auto; margin-top: 8px; }
+  .room-select { width: auto; min-width: 180px; }
+  h3.sub { margin-top: 20px; font-size: 14px; color: var(--muted); }
+  .model-status { border: 1px solid var(--border); border-radius: 10px; padding: 16px; margin-top: 8px; }
+  .model-head { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 16px; margin-bottom: 16px; }
+  .steps { display: flex; align-items: flex-start; gap: 8px; margin-bottom: 16px; flex-wrap: wrap; }
+  .step { display: flex; gap: 10px; align-items: flex-start; flex: 1; min-width: 170px; opacity: .55; }
+  .step.done, .step.current { opacity: 1; }
+  .step-dot { flex: none; width: 28px; height: 28px; border-radius: 50%; display: flex; align-items: center; justify-content: center;
+    border: 2px solid var(--border); font-weight: 500; font-size: 13px; }
+  .step.done .step-dot { background: #43a047; border-color: #43a047; color: #fff; }
+  .step.current .step-dot { border-color: var(--accent); color: var(--accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 20%, transparent); }
+  .step-title { font-weight: 500; font-size: 14px; }
+  .step-line { width: 24px; height: 2px; background: var(--border); margin-top: 14px; flex: none; }
+  .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 12px; margin-bottom: 8px; }
+  .tile { background: var(--secondary-background-color, rgba(0,0,0,.04)); border-radius: 8px; padding: 12px; display: flex; flex-direction: column; gap: 4px; }
   table { width: 100%; border-collapse: collapse; font-size: 14px; }
   th, td { text-align: left; padding: 8px; border-bottom: 1px solid var(--border); vertical-align: top; }
   th { font-weight: 500; color: var(--muted); font-size: 12px; }
-  .form-grid { display: grid; gap: 12px; grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)); margin: 8px 0; }
+  .form-grid { display: grid; gap: 12px; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); margin: 8px 0; align-items: end; }
   .field { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--muted); }
   .field.hidden { display: none; }
   input[type=text], input[type=number], input[type=time], input[type=search], select {
@@ -1108,6 +1245,7 @@ const STYLE = `
   @keyframes spin { to { transform: rotate(360deg); } }
   @keyframes slide { from { transform: translateX(-100%); } to { transform: translateX(400%); } }
   @media (max-width: 600px) {
+    .step-line { display: none; }
     .content { padding: 8px; }
     .grid.wide { grid-template-columns: 1fr; }
     .tab span { display: none; }

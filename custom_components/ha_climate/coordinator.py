@@ -32,6 +32,7 @@ from homeassistant.const import (
 )
 from homeassistant.core import CALLBACK_TYPE, Event, HomeAssistant, callback
 from homeassistant.exceptions import HomeAssistantError
+from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.event import (
     async_track_state_change_event,
     async_track_time_change,
@@ -67,6 +68,7 @@ from .const import (
     CONF_FIREPLACE_TEMP_SENSOR,
     CONF_FIREPLACE_THRESHOLD,
     CONF_GAS_PRICE,
+    CONF_GAS_FIXED_COSTS,
     CONF_GAS_PRICE_ENTITY,
     CONF_GAS_SENSOR,
     CONF_HEATING_LIMIT,
@@ -95,12 +97,20 @@ from .const import (
     FIREPLACE_RISE_WINDOW,
     HEATING_ACTIONS,
     HISTORY_RETENTION_DAYS,
+    HISTORY_STORAGE_KEY,
     STORAGE_KEY,
     STORAGE_VERSION,
     UPDATE_INTERVAL,
 )
-from .statistics import async_daily_history, async_period_value
-from .thermal import PreheatPlan, RoomThermalModel, night_period, preheat_lead
+from .recorder_history import async_backfill_observations
+from .statistics import async_daily_history, async_first_overlap, async_period_value
+from .thermal import (
+    PreheatPlan,
+    RoomThermalModel,
+    model_stage,
+    night_period,
+    preheat_lead,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -159,6 +169,9 @@ class EnergyData:
     saved_total_days: int = 0
     gas_price: float = DEFAULT_GAS_PRICE
     gas_price_source: str = "standaard"
+    fixed_costs: float = 0.0  # € per day
+    cost_today: float | None = None  # variable + fixed
+    cost_yesterday: float | None = None
 
 
 class HaClimateCoordinator(DataUpdateCoordinator[EnergyData]):
@@ -179,6 +192,12 @@ class HaClimateCoordinator(DataUpdateCoordinator[EnergyData]):
             hass, STORAGE_VERSION, f"{STORAGE_KEY}.{entry.entry_id}"
         )
         self._stored: dict[str, Any] = {}
+        # Permanent history (daily degree days/gas and all thermal observations).
+        self._history_store: Store[dict[str, Any]] = Store(
+            hass, STORAGE_VERSION, f"{HISTORY_STORAGE_KEY}.{entry.entry_id}"
+        )
+        self._history: dict[str, Any] = {}
+        self._recalculate_lock = asyncio.Lock()
         self._unsub: list[CALLBACK_TYPE] = []
         self._setback_lock = asyncio.Lock()
         self.baseline: BaselineResult | None = None
@@ -257,7 +276,6 @@ class HaClimateCoordinator(DataUpdateCoordinator[EnergyData]):
         stored.setdefault("savings_offset", 0.0)
         stored.setdefault("meter_start", {})
         stored.setdefault("baseline", None)
-        stored.setdefault("models", {})
         stored.setdefault(
             "installed_on",
             min([*stored["savings"].keys(), dt_util.now().date().isoformat()]),
@@ -266,9 +284,21 @@ class HaClimateCoordinator(DataUpdateCoordinator[EnergyData]):
         if (cached := stored.get("baseline")) is not None:
             self.baseline = _baseline_from_dict(cached)
             self.baseline_updated = dt_util.parse_datetime(cached.get("updated", ""))
+        history = await self._history_store.async_load() or {}
+        history.setdefault("days", {})
+        history.setdefault("models", {})
+        history.setdefault("overlap_start", None)
+        # Migrate models from the old single storage file. The history is
+        # written right away, before the old copy can disappear from storage.
+        legacy_models = stored.pop("models", None)
+        self._history = history
+        if legacy_models:
+            for room_id, model in legacy_models.items():
+                history["models"].setdefault(room_id, model)
+            await self._history_store.async_save(history)
         for room in self.rooms:
             self.models[room[CONF_ROOM_ID]] = RoomThermalModel.from_dict(
-                stored["models"].get(room[CONF_ROOM_ID])
+                history["models"].get(room[CONF_ROOM_ID])
             )
 
     @callback
@@ -278,10 +308,20 @@ class HaClimateCoordinator(DataUpdateCoordinator[EnergyData]):
         self._store.async_delay_save(self._data_to_save, 10)
 
     def _data_to_save(self) -> dict[str, Any]:
-        self._stored["models"] = {
-            room_id: model.as_dict() for room_id, model in self.models.items()
-        }
         return self._stored
+
+    @callback
+    def _async_save_history(self) -> None:
+        """Schedule a save of the permanent history (written less often)."""
+        self._history_store.async_delay_save(self._history_to_save, 60)
+
+    def _history_to_save(self) -> dict[str, Any]:
+        # Models of rooms that were removed are kept, so re-adding a room with
+        # the same id (or restoring a backup) does not lose what was learned.
+        self._history["models"].update(
+            {room_id: model.as_dict() for room_id, model in self.models.items()}
+        )
+        return self._history
 
     def _prune_history(self) -> None:
         cutoff = (dt_util.now().date() - timedelta(days=HISTORY_RETENTION_DAYS)).isoformat()
@@ -327,6 +367,14 @@ class HaClimateCoordinator(DataUpdateCoordinator[EnergyData]):
     async def _async_started(self, _hass: HomeAssistant) -> None:
         """Run once Home Assistant has fully started."""
         await self.async_recalculate_baseline()
+        # New rooms (or a first start) learn right away from recorder history.
+        pending = [
+            room[CONF_ROOM_ID]
+            for room in self.rooms
+            if not self.model(room[CONF_ROOM_ID]).backfill
+        ]
+        if pending:
+            await self.async_backfill_thermal(pending)
         await self._async_tick(dt_util.now())
         # Sensors may not have had a state yet during the first refresh.
         await self.async_request_refresh()
@@ -341,6 +389,7 @@ class HaClimateCoordinator(DataUpdateCoordinator[EnergyData]):
         """Flush state on shutdown."""
         self.async_stop()
         await self._store.async_save(self._data_to_save())
+        await self._history_store.async_save(self._history_to_save())
         await super().async_shutdown()
 
     # ------------------------------------------------------------------
@@ -453,12 +502,12 @@ class HaClimateCoordinator(DataUpdateCoordinator[EnergyData]):
             ):
                 learned = True
         if learned:
-            self._async_save()
+            self._async_save_history()
 
     def reset_model(self, room_id: str) -> None:
         """Forget what was learned for a room."""
         self.model(room_id).reset()
-        self._async_save()
+        self._async_save_history()
 
     def comfort_temperature(self, room: dict[str, Any]) -> float | None:
         """Return the temperature the room should have during the day."""
@@ -735,21 +784,91 @@ class HaClimateCoordinator(DataUpdateCoordinator[EnergyData]):
             {date.fromisoformat(d) for d in self._stored["setback_dates"]},
         )
 
-    async def _async_records(self, days: int) -> list[DayRecord]:
-        cfg = self.config
-        return await async_daily_history(
-            self.hass, cfg[CONF_OUTDOOR_SENSOR], cfg[CONF_GAS_SENSOR], days
-        )
+    # ---- permanent daily store -------------------------------------
+    def _store_records(self, records: list[DayRecord]) -> int:
+        """Merge daily statistics into the permanent store; returns new days."""
+        days: dict[str, list[float | None]] = self._history["days"]
+        new = 0
+        for record in records:
+            key = record.day.isoformat()
+            old = days.get(key, [None, None])
+            mean = record.mean_temperature if record.mean_temperature is not None else old[0]
+            gas = record.gas if record.gas is not None else old[1]
+            value = [
+                round(mean, 3) if mean is not None else None,
+                round(gas, 4) if gas is not None else None,
+            ]
+            if key not in days:
+                new += 1
+            if days.get(key) != value:
+                days[key] = value
+        if records:
+            self._async_save_history()
+        return new
 
-    async def async_recalculate_baseline(self) -> BaselineResult | None:
-        """Recalculate the baseline from the recorder's long-term statistics."""
+    def _stored_records(self, start: date, end: date) -> list[DayRecord]:
+        """Daily records from the permanent store for start ≤ day < end."""
+        records = []
+        for key, (mean, gas) in sorted(self._history["days"].items()):
+            day = date.fromisoformat(key)
+            if start <= day < end:
+                records.append(DayRecord(day=day, mean_temperature=mean, gas=gas))
+        return records
+
+    async def _async_sync_days(self, days: int | None = None, start: datetime | None = None) -> None:
+        """Copy daily statistics from the recorder into the permanent store."""
+        cfg = self.config
+        records = await async_daily_history(
+            self.hass, cfg[CONF_OUTDOOR_SENSOR], cfg[CONF_GAS_SENSOR], days=days, start=start
+        )
+        self._store_records(records)
+
+    @property
+    def overlap_start(self) -> date | None:
+        """First day on which both the outdoor and the gas sensor have data."""
+        value = self._history.get("overlap_start")
+        return date.fromisoformat(value) if value else None
+
+    # ---- recalculation ---------------------------------------------
+    async def async_recalculate(self) -> BaselineResult | None:
+        """Full recalculation: gas baseline from LTS and thermal backfill."""
+        async with self._recalculate_lock:
+            result = await self.async_recalculate_baseline(full=True)
+            await self.async_backfill_thermal()
+        await self.async_request_refresh()
+        return result
+
+    async def async_recalculate_baseline(self, full: bool = False) -> BaselineResult | None:
+        """Recalculate the baseline from all stored days since the sensor overlap.
+
+        With ``full`` (or when nothing is stored yet) the complete long-term
+        statistics history is read from the first day both sensors have data;
+        otherwise only the last few days are synced into the permanent store.
+        """
+        cfg = self.config
+        today = dt_util.now().date()
         try:
-            records = await self._async_records(
-                int(self.config.get(CONF_BASELINE_DAYS, DEFAULT_BASELINE_DAYS))
-            )
+            if full or not self._history["days"] or self.overlap_start is None:
+                overlap = await async_first_overlap(
+                    self.hass, cfg[CONF_OUTDOOR_SENSOR], cfg[CONF_GAS_SENSOR]
+                )
+                if overlap is not None:
+                    self._history["overlap_start"] = overlap.date().isoformat()
+                    await self._async_sync_days(start=overlap)
+            else:
+                await self._async_sync_days(days=7)
         except Exception:  # noqa: BLE001
             _LOGGER.exception("Reading long-term statistics failed")
-            return self.baseline
+
+        # Days before the overlap can exist in the store (from earlier
+        # versions); the baseline only uses days where both sensors had data.
+        start = self.overlap_start or (
+            min((date.fromisoformat(d) for d in self._history["days"]), default=today)
+        )
+        window = int(cfg.get(CONF_BASELINE_DAYS) or DEFAULT_BASELINE_DAYS)
+        if window > 0:
+            start = max(start, today - timedelta(days=window))
+        records = self._stored_records(start, today)
 
         fireplace_days, setback_days = self._excluded_days()
         result = calculate_baseline(
@@ -769,6 +888,8 @@ class HaClimateCoordinator(DataUpdateCoordinator[EnergyData]):
             self._stored["baseline"] = {
                 **_baseline_to_dict(self.baseline),
                 "updated": self.baseline_updated.isoformat(),
+                "window_start": start.isoformat(),
+                "days_available": len(records),
             }
         else:
             _LOGGER.info(
@@ -779,6 +900,64 @@ class HaClimateCoordinator(DataUpdateCoordinator[EnergyData]):
         _LOGGER.debug("Baseline: %s", self.baseline)
         self.async_update_listeners()
         return self.baseline
+
+    def baseline_info(self) -> dict[str, Any]:
+        """Describe the period the baseline is based on."""
+        stored = self._stored.get("baseline") or {}
+        return {
+            "overlap_start": self._history.get("overlap_start"),
+            "window_start": stored.get("window_start"),
+            "days_available": stored.get("days_available"),
+            "days_stored": len(self._history["days"]),
+        }
+
+    def _fireplace_entity_id(self) -> str | None:
+        registry = er.async_get(self.hass)
+        return registry.async_get_entity_id(
+            "binary_sensor", DOMAIN, f"{self.config_entry.entry_id}_fireplace_active"
+        )
+
+    async def async_backfill_thermal(self, room_ids: list[str] | None = None) -> None:
+        """Learn from the recorder history of the rooms' climate entities."""
+        outdoor = self.config[CONF_OUTDOOR_SENSOR]
+        for room in self.rooms:
+            room_id = room[CONF_ROOM_ID]
+            if room_ids is not None and room_id not in room_ids:
+                continue
+            fireplace = self._fireplace_entity_id() if self.room_has_fireplace(room) else None
+            try:
+                observations, summary = await async_backfill_observations(
+                    self.hass, room.get(CONF_ROOM_CLIMATES, []), outdoor, fireplace
+                )
+            except Exception:  # noqa: BLE001
+                _LOGGER.exception("Reading recorder history for %s failed", room[CONF_ROOM_NAME])
+                continue
+            model = self.model(room_id)
+            summary["new"] = model.merge(observations)
+            model.backfill = summary
+            _LOGGER.debug(
+                "Backfill %s: %s windows, %s new", room[CONF_ROOM_NAME],
+                summary.get("windows", 0), summary["new"],
+            )
+        self._async_save_history()
+        self.async_update_listeners()
+
+    def model_status(self, room_id: str) -> dict[str, Any]:
+        """Return the learning status of a room's model."""
+        model = self.model(room_id)
+        estimate = model.estimate
+        summary = model.summary()
+        return {
+            **summary,
+            "stage": model_stage(estimate, summary["data_points"]),
+            "confidence": estimate.confidence,
+            "cooling_confidence": estimate.cooling_confidence,
+            "heating_confidence": estimate.heating_confidence,
+            "cooling_coefficient": estimate.cooling_coefficient,
+            "heating_power": estimate.heating_power,
+            "time_constant": estimate.time_constant,
+            "backfill": model.backfill,
+        }
 
     def _backfill_savings(self, records: list[DayRecord]) -> None:
         """Store the savings of every completed day since installation."""
@@ -799,52 +978,68 @@ class HaClimateCoordinator(DataUpdateCoordinator[EnergyData]):
             if saved is not None:
                 self._stored["savings"][record.day.isoformat()] = saved
 
+    def gas_cost(self, gas: float | None, price: float, fixed: float) -> float | None:
+        """Total gas costs of a day: variable usage plus fixed delivery costs."""
+        if gas is None:
+            return None
+        return gas * price + fixed
+
     async def async_history(self, days: int) -> list[dict[str, Any]]:
         """Return per-day analytics for the panel (oldest first, today last)."""
-        records = await self._async_records(days)
+        today = dt_util.now().date()
+        try:
+            await self._async_sync_days(days=days)
+        except Exception:  # noqa: BLE001
+            _LOGGER.debug("Could not sync recent statistics", exc_info=True)
+        records = self._stored_records(today - timedelta(days=days), today)
         baseline = self.baseline.m3_per_degree_day if self.baseline else None
         fireplace_days, setback_days = self._excluded_days()
-        price = self.data.gas_price if self.data else DEFAULT_GAS_PRICE
+        price = self.data.gas_price if self.data else self._gas_price()[0]
+        fixed = self.data.fixed_costs if self.data else self._fixed_costs()
         rows: list[dict[str, Any]] = []
         cumulative = 0.0
+
+        def row(day: date, mean, dd, gas, expected, saved, **extra) -> dict[str, Any]:
+            nonlocal cumulative
+            cumulative += saved or 0.0
+            return {
+                "date": day.isoformat(),
+                "mean_temperature": mean,
+                "degree_days": dd,
+                "gas": gas,
+                "expected": expected,
+                "saved": saved,
+                "saved_eur": money(saved, price),
+                "cumulative_saved": cumulative,
+                "cumulative_saved_eur": cumulative * price,
+                "cost_variable": money(gas, price),
+                "cost_fixed": fixed if gas is not None else None,
+                "cost": self.gas_cost(gas, price, fixed),
+                "fireplace": day in fireplace_days,
+                "setback": day in setback_days,
+                **extra,
+            }
+
         for record in records:
             dd = degree_days(record.mean_temperature, self.heating_limit)
             expected = expected_gas(baseline, dd)
-            saved = gas_savings(expected, record.gas)
-            cumulative += saved or 0.0
             rows.append(
-                {
-                    "date": record.day.isoformat(),
-                    "mean_temperature": record.mean_temperature,
-                    "degree_days": dd,
-                    "gas": record.gas,
-                    "expected": expected,
-                    "saved": saved,
-                    "saved_eur": money(saved, price),
-                    "cumulative_saved": cumulative,
-                    "cumulative_saved_eur": cumulative * price,
-                    "fireplace": record.day in fireplace_days,
-                    "setback": record.day in setback_days,
-                }
+                row(record.day, record.mean_temperature, dd, record.gas, expected,
+                    gas_savings(expected, record.gas))
             )
         if self.data is not None:
-            cumulative += self.data.saved_today or 0.0
             rows.append(
-                {
-                    "date": dt_util.now().date().isoformat(),
-                    "mean_temperature": self.data.mean_temp_today,
-                    "degree_days": self.data.degree_days_today,
-                    "gas": self.data.gas_today,
-                    "expected": self.data.expected_today,
-                    "saved": self.data.saved_today,
-                    "saved_eur": money(self.data.saved_today, price),
-                    "cumulative_saved": cumulative,
-                    "cumulative_saved_eur": cumulative * price,
-                    "fireplace": self.fireplace_minutes_today() >= FIREPLACE_EXCLUDE_MINUTES,
-                    "setback": dt_util.now().date() in setback_days,
-                    "partial": True,
-                }
+                row(
+                    today,
+                    self.data.mean_temp_today,
+                    self.data.degree_days_today,
+                    self.data.gas_today,
+                    self.data.expected_today,
+                    self.data.saved_today,
+                    partial=True,
+                )
             )
+            rows[-1]["fireplace"] = self.fireplace_minutes_today() >= FIREPLACE_EXCLUDE_MINUTES
         return rows
 
     # ------------------------------------------------------------------
@@ -878,6 +1073,10 @@ class HaClimateCoordinator(DataUpdateCoordinator[EnergyData]):
             return price, "vast"
         return DEFAULT_GAS_PRICE, "standaard"
 
+    def _fixed_costs(self) -> float:
+        """Fixed gas delivery costs in € per day (0 when not set)."""
+        return _float_or_none(self.config.get(CONF_GAS_FIXED_COSTS)) or 0.0
+
     async def _async_gas_today(self, start: datetime, now: datetime) -> float | None:
         """Gas used today; falls back to the meter reading stored at midnight."""
         gas_id = self.config[CONF_GAS_SENSOR]
@@ -903,7 +1102,9 @@ class HaClimateCoordinator(DataUpdateCoordinator[EnergyData]):
         limit = self.heating_limit
 
         price, source = self._gas_price()
-        data = EnergyData(gas_price=price, gas_price_source=source)
+        data = EnergyData(
+            gas_price=price, gas_price_source=source, fixed_costs=self._fixed_costs()
+        )
 
         data.mean_temp_today = await async_period_value(
             self.hass, temp_id, today, now, "mean"
@@ -939,6 +1140,16 @@ class HaClimateCoordinator(DataUpdateCoordinator[EnergyData]):
             self._stored["savings"][yesterday_key] = data.saved_yesterday
             self._async_save()
         data.saved_total, data.saved_total_days = self._saved_total(data.saved_today)
+        data.cost_today = self.gas_cost(data.gas_today, price, data.fixed_costs)
+        data.cost_yesterday = self.gas_cost(data.gas_yesterday, price, data.fixed_costs)
+
+        # Keep yesterday permanently (also after the recorder purged its states).
+        if data.mean_temp_yesterday is not None or data.gas_yesterday is not None:
+            key = yesterday.date().isoformat()
+            if key not in self._history["days"] or None in self._history["days"][key]:
+                self._store_records(
+                    [DayRecord(yesterday.date(), data.mean_temp_yesterday, data.gas_yesterday)]
+                )
         return data
 
     def to_euro(self, volume: float | None) -> float | None:

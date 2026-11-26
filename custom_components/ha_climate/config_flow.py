@@ -25,6 +25,7 @@ from .const import (
     CONF_FIREPLACE_TEMP_SENSOR,
     CONF_FIREPLACE_THRESHOLD,
     CONF_GAS_PRICE,
+    CONF_GAS_FIXED_COSTS,
     CONF_GAS_PRICE_ENTITY,
     CONF_GAS_SENSOR,
     CONF_HEATING_LIMIT,
@@ -52,7 +53,7 @@ from .const import (
 )
 
 # Optional fields that can be cleared in the UI.
-OPTIONAL_GENERAL = (CONF_GAS_PRICE, CONF_GAS_PRICE_ENTITY)
+OPTIONAL_GENERAL = (CONF_GAS_PRICE, CONF_GAS_PRICE_ENTITY, CONF_GAS_FIXED_COSTS)
 OPTIONAL_FIREPLACE = (CONF_FIREPLACE_CLIMATE, CONF_FIREPLACE_TEMP_SENSOR)
 
 
@@ -96,6 +97,17 @@ def _general_schema(values: dict[str, Any]) -> vol.Schema:
             ): selector.EntitySelector(
                 selector.EntitySelectorConfig(domain=["sensor", "input_number", "number"])
             ),
+            vol.Optional(
+                CONF_GAS_FIXED_COSTS, description=_suggest(values, CONF_GAS_FIXED_COSTS)
+            ): selector.NumberSelector(
+                selector.NumberSelectorConfig(
+                    min=0,
+                    max=10,
+                    step="any",
+                    unit_of_measurement="€/dag",
+                    mode=selector.NumberSelectorMode.BOX,
+                )
+            ),
             vol.Required(
                 CONF_HEATING_LIMIT,
                 default=values.get(CONF_HEATING_LIMIT, DEFAULT_HEATING_LIMIT),
@@ -113,8 +125,8 @@ def _general_schema(values: dict[str, Any]) -> vol.Schema:
                 default=values.get(CONF_BASELINE_DAYS, DEFAULT_BASELINE_DAYS),
             ): selector.NumberSelector(
                 selector.NumberSelectorConfig(
-                    min=14,
-                    max=1095,
+                    min=0,
+                    max=3650,
                     step=1,
                     unit_of_measurement="d",
                     mode=selector.NumberSelectorMode.BOX,
@@ -242,6 +254,7 @@ class HaClimateConfigFlow(ConfigFlow, domain=DOMAIN):
     """Handle the initial configuration."""
 
     VERSION = 1
+    MINOR_VERSION = 2
 
     def __init__(self) -> None:
         """Initialize the flow."""

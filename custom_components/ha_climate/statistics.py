@@ -58,15 +58,69 @@ async def async_period_value(
     return value
 
 
+HISTORY_SEARCH_YEARS = 10
+
+
+async def async_first_overlap(
+    hass: HomeAssistant, temperature_id: str, gas_id: str
+) -> datetime | None:
+    """Return the first local day on which both statistics have data.
+
+    Uses monthly statistics to find the first month quickly, then daily
+    statistics within that month for the exact day.
+    """
+    today = dt_util.start_of_local_day()
+    search_from = today - timedelta(days=365 * HISTORY_SEARCH_YEARS)
+    monthly = await get_instance(hass).async_add_executor_job(
+        statistics_during_period,
+        hass,
+        search_from,
+        today,
+        {temperature_id, gas_id},
+        "month",
+        UNITS,
+        {"mean", "change"},
+    )
+    firsts = []
+    for statistic_id, key in ((temperature_id, "mean"), (gas_id, "change")):
+        rows = [r for r in monthly.get(statistic_id, []) if r.get(key) is not None]
+        if not rows:
+            return None
+        firsts.append(_row_start(rows[0]["start"]))
+    month_start = max(firsts)
+    daily = await get_instance(hass).async_add_executor_job(
+        statistics_during_period,
+        hass,
+        month_start,
+        min(today, month_start + timedelta(days=62)),
+        {temperature_id, gas_id},
+        "day",
+        UNITS,
+        {"mean", "change"},
+    )
+    days = []
+    for statistic_id, key in ((temperature_id, "mean"), (gas_id, "change")):
+        rows = [r for r in daily.get(statistic_id, []) if r.get(key) is not None]
+        days.append(_row_start(rows[0]["start"]) if rows else month_start)
+    return dt_util.start_of_local_day(max(days))
+
+
 async def async_daily_history(
     hass: HomeAssistant,
     temperature_id: str,
     gas_id: str,
-    days: int,
+    days: int | None = None,
+    start: datetime | None = None,
 ) -> list[DayRecord]:
-    """Return daily mean temperature and gas usage for the last ``days`` full days."""
+    """Return daily mean temperature and gas usage for full days.
+
+    Either the last ``days`` days or everything from ``start`` until yesterday.
+    """
     today = dt_util.start_of_local_day()
-    start = today - timedelta(days=days)
+    if start is None:
+        start = today - timedelta(days=days or 1)
+    if start >= today:
+        return []
     stats = await get_instance(hass).async_add_executor_job(
         statistics_during_period,
         hass,

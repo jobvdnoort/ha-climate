@@ -24,6 +24,7 @@ from .const import (
     CONF_FIREPLACE_TEMP_SENSOR,
     CONF_FIREPLACE_THRESHOLD,
     CONF_GAS_PRICE,
+    CONF_GAS_FIXED_COSTS,
     CONF_GAS_PRICE_ENTITY,
     CONF_GAS_SENSOR,
     CONF_HEATING_LIMIT,
@@ -58,6 +59,7 @@ SETTING_KEYS = (
     CONF_OUTDOOR_SENSOR,
     CONF_GAS_SENSOR,
     CONF_GAS_PRICE,
+    CONF_GAS_FIXED_COSTS,
     CONF_GAS_PRICE_ENTITY,
     CONF_HEATING_LIMIT,
     CONF_BASELINE_DAYS,
@@ -118,7 +120,10 @@ SETTINGS_SCHEMA = vol.Schema(
         ),
         vol.Optional(CONF_GAS_PRICE_ENTITY): _ENTITY,
         vol.Optional(CONF_HEATING_LIMIT): vol.All(vol.Coerce(float), vol.Range(min=10, max=25)),
-        vol.Optional(CONF_BASELINE_DAYS): vol.All(vol.Coerce(int), vol.Range(min=14, max=1095)),
+        vol.Optional(CONF_BASELINE_DAYS): vol.All(vol.Coerce(int), vol.Range(min=0, max=3650)),
+        vol.Optional(CONF_GAS_FIXED_COSTS): vol.Any(
+            None, vol.All(vol.Coerce(float), vol.Range(min=0, max=10))
+        ),
         vol.Optional(CONF_NIGHT_START): _time,
         vol.Optional(CONF_NIGHT_END): _time,
         vol.Optional(CONF_NIGHT_OFFSET): vol.All(vol.Coerce(float), vol.Range(min=-10, max=0)),
@@ -236,6 +241,7 @@ def _room_payload(coordinator: HaClimateCoordinator, room: dict[str, Any]) -> di
             "observations": estimate.observations,
             "delta_t": _round(delta_t, 2),
         },
+        "model_status": coordinator.model_status(room_id),
         "preheat": {
             "next_heating_start": next_start.isoformat() if next_start else None,
             "lead_minutes": round(plan.lead.total_seconds() / 60) if plan else None,
@@ -267,6 +273,7 @@ async def ws_state(hass, connection, msg, entry: HaClimateConfigEntry) -> None:
         (CONF_NIGHT_END, DEFAULT_NIGHT_END),
         (CONF_NIGHT_OFFSET, DEFAULT_NIGHT_OFFSET),
         (CONF_FIREPLACE_THRESHOLD, DEFAULT_FIREPLACE_THRESHOLD),
+        (CONF_GAS_FIXED_COSTS, 0.0),
     ):
         if settings.get(key) is None:
             settings[key] = default
@@ -289,6 +296,15 @@ async def ws_state(hass, connection, msg, entry: HaClimateConfigEntry) -> None:
                 "reliable": bool(baseline and baseline.reliable),
                 "excluded_fireplace": baseline.excluded_fireplace if baseline else 0,
                 "excluded_setback": baseline.excluded_setback if baseline else 0,
+                "excluded_warm": baseline.excluded_warm if baseline else 0,
+                "excluded_invalid": baseline.excluded_invalid if baseline else 0,
+                "first_day": baseline.first_day.isoformat()
+                if baseline and baseline.first_day
+                else None,
+                "last_day": baseline.last_day.isoformat()
+                if baseline and baseline.last_day
+                else None,
+                **coordinator.baseline_info(),
                 "updated": coordinator.baseline_updated.isoformat()
                 if coordinator.baseline_updated
                 else None,
@@ -505,6 +521,5 @@ async def ws_reset_model(hass, connection, msg, entry: HaClimateConfigEntry) -> 
 async def ws_recalculate_baseline(hass, connection, msg, entry: HaClimateConfigEntry) -> None:
     """Recalculate the baseline."""
     coordinator = entry.runtime_data
-    await coordinator.async_recalculate_baseline()
-    await coordinator.async_refresh()
+    await coordinator.async_recalculate()
     connection.send_result(msg["id"], {})

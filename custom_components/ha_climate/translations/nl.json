@@ -10,10 +10,13 @@
           "gas_price": "Gasprijs (vast)",
           "gas_price_entity": "Gasprijs-entiteit (optioneel)",
           "heating_limit": "Stookgrens",
-          "baseline_days": "Historie voor baseline (dagen)"
+          "baseline_days": "Historie voor baseline (dagen, 0 = alles)",
+          "gas_fixed_costs": "Vaste leveringskosten (€/dag)"
         },
         "data_description": {
-          "heating_limit": "Graaddagen = max(0, stookgrens − gemiddelde buitentemperatuur). Standaard 18 °C."
+          "heating_limit": "Graaddagen = max(0, stookgrens − gemiddelde buitentemperatuur). Standaard 18 °C.",
+          "baseline_days": "0 = alle dagen vanaf het eerste moment dat beide sensoren data hebben.",
+          "gas_fixed_costs": "Optioneel, wordt bij de totale gaskosten per dag opgeteld (niet bij de besparing)."
         }
       },
       "night": {
@@ -64,10 +67,13 @@
           "gas_price": "Gasprijs (vast)",
           "gas_price_entity": "Gasprijs-entiteit (optioneel)",
           "heating_limit": "Stookgrens",
-          "baseline_days": "Historie voor baseline (dagen)"
+          "baseline_days": "Historie voor baseline (dagen, 0 = alles)",
+          "gas_fixed_costs": "Vaste leveringskosten (€/dag)"
         },
         "data_description": {
-          "heating_limit": "Graaddagen = max(0, stookgrens − gemiddelde buitentemperatuur). Standaard 18 °C."
+          "heating_limit": "Graaddagen = max(0, stookgrens − gemiddelde buitentemperatuur). Standaard 18 °C.",
+          "baseline_days": "0 = alle dagen vanaf het eerste moment dat beide sensoren data hebben.",
+          "gas_fixed_costs": "Optioneel, wordt bij de totale gaskosten per dag opgeteld (niet bij de besparing)."
         }
       },
       "night": {
@@ -219,6 +225,12 @@
       "saved_money_total": {
         "name": "Besparing totaal"
       },
+      "gas_cost_today": {
+        "name": "Gaskosten vandaag"
+      },
+      "gas_cost_yesterday": {
+        "name": "Gaskosten gisteren"
+      },
       "room_cooling_rate": {
         "name": "Afkoelsnelheid {room}"
       },
@@ -236,7 +248,7 @@
   "services": {
     "recalculate_baseline": {
       "name": "Baseline herberekenen",
-      "description": "Leest de langetermijnstatistieken opnieuw uit en berekent de gas-baseline (m³ per graaddag).",
+      "description": "Leest alle langetermijnstatistieken (vanaf het eerste moment dat beide sensoren data hebben) opnieuw uit voor de gas-baseline, en leert de kamermodellen bij uit de recorder-historie van de thermostaten.",
       "fields": {
         "config_entry_id": {
           "name": "Configuratie",

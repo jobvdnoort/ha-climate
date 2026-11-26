@@ -1,6 +1,6 @@
 """Tests for the self-learning thermal model and optimum start."""
 
-from datetime import datetime, time, timedelta
+from datetime import UTC, datetime, time, timedelta
 import math
 import random
 
@@ -8,7 +8,7 @@ import pytest
 
 from .conftest import thermal
 
-T0 = datetime(2026, 1, 5, 0, 0)
+T0 = datetime(2026, 1, 5, 0, 0, tzinfo=UTC)
 
 
 def _simulate(h=1.2, k=0.04, days=14, seed=1, lag_minutes=0):
@@ -68,6 +68,15 @@ def test_no_observation_on_gaps_or_invalid_samples():
     assert len(model.observations) == 0
 
 
+def test_window_with_gap_is_discarded():
+    model = thermal.RoomThermalModel()
+    for i in range(121):
+        if 30 <= i < 45:  # 15 minutes without samples
+            continue
+        model.add_sample(T0 + timedelta(minutes=i), 20.0 - i * 0.01, 5.0, False)
+    assert model.observations == []
+
+
 def test_window_produces_observation():
     model = thermal.RoomThermalModel()
     ts = T0
@@ -76,6 +85,8 @@ def test_window_produces_observation():
         obs = model.add_sample(ts, 20.0 - i * 0.01, 5.0, False) or obs
         ts += timedelta(minutes=1)
     assert obs is not None
+    assert obs.start == int(T0.timestamp())
+    assert obs.source == thermal.SOURCE_LIVE
     assert obs.slope == pytest.approx(-0.6, abs=0.01)
     assert obs.duty == 0.0
     assert obs.delta_t == pytest.approx(14.4, abs=0.1)
@@ -135,6 +146,113 @@ def test_preheat_caps_and_handles_missing_data():
     assert thermal.preheat_lead(14.0, 20.0, 5.0, est).lead == thermal.MAX_PREHEAT
     assert thermal.preheat_lead(None, 20.0, 5.0, est).lead == thermal.MAX_PREHEAT
     assert thermal.preheat_lead(21.0, 20.0, 5.0, est).lead == timedelta(0)
+
+
+def test_estimate_time_constant():
+    est = thermal.ModelEstimate(cooling_coefficient=0.04)
+    assert est.time_constant == pytest.approx(25.0)
+    assert thermal.ModelEstimate().time_constant is None
+
+
+def test_model_stage():
+    est = thermal.ModelEstimate(heating_confidence=90, cooling_confidence=90)
+    assert thermal.model_stage(est, 5) == 1
+    assert thermal.model_stage(thermal.ModelEstimate(), 100) == 1
+    low = thermal.ModelEstimate(heating_confidence=30, cooling_confidence=40)
+    assert thermal.model_stage(low, 100) == 2
+    assert thermal.model_stage(est, 100) == 3
+
+
+def test_legacy_observations_are_loaded():
+    model = thermal.RoomThermalModel.from_dict({"observations": [[-0.5, 0.0, 12.0]]})
+    assert model.observations[0].slope == -0.5
+    assert model.observations[0].start == 0
+    data = model.as_dict()
+    assert data["observations"][0] == [0, -0.5, 0.0, 12.0, "l"]
+
+
+def test_dedup_on_window_start():
+    model = thermal.RoomThermalModel()
+    obs = thermal.Observation(-0.3, 0.0, 10.0, start=7200, source="h")
+    assert model.add_observation(obs)
+    assert not model.add_observation(thermal.Observation(-0.1, 0.5, 9.0, start=7200))
+    assert model.merge([obs, thermal.Observation(-0.2, 0.0, 9.0, start=14400)]) == 1
+    assert [o.start for o in model.observations] == [7200, 14400]
+    # Out of order inserts stay sorted.
+    model.add_observation(thermal.Observation(-0.2, 0.0, 9.0, start=3600 * 0))
+    assert [o.start for o in model.observations] == [0, 7200, 14400]
+
+
+def test_observations_are_kept_beyond_fit_window():
+    model = thermal.RoomThermalModel()
+    day = 86400
+    for i in range(400):  # one observation per day for 400 days
+        model.add_observation(thermal.Observation(-0.4, 0.0, 10.0, start=(i + 1) * day))
+    assert len(model.observations) == 400
+    fit = model.fit_observations()
+    # At least MIN_FIT_OBSERVATIONS even though they span more than 90 days.
+    assert len(fit) == thermal.MIN_FIT_OBSERVATIONS
+    summary = model.summary()
+    assert summary["data_points"] == 400
+    assert summary["days"] == 400
+    assert summary["fit_points"] == thermal.MIN_FIT_OBSERVATIONS
+
+
+def _history_from_simulation(hours=8):
+    """Build recorder-style change lists and the matching live model."""
+    temps, actions, outdoor = [], [], []
+    live = thermal.RoomThermalModel()
+    temp = 20.0
+    for minute in range(hours * 60):
+        ts = T0 + timedelta(minutes=minute)
+        heating = (minute // 60) % 2 == 0
+        temp += (1.2 * heating - 0.04 * (temp - 5.0)) / 60
+        value = round(temp, 2)
+        if not temps or temps[-1][1] != value:
+            temps.append((ts, value))
+        action = "heating" if heating else "idle"
+        if not actions or actions[-1][1] != action:
+            actions.append((ts, action))
+        live.add_sample(ts, value, 5.0, heating)
+    outdoor.append((T0 - timedelta(hours=1), 5.0))
+    return {"climate.a": (temps, actions)}, outdoor, live
+
+
+def test_backfill_matches_live_and_deduplicates():
+    loops, outdoor, live = _history_from_simulation()
+    end = T0 + timedelta(hours=8)
+    observations = thermal.observations_from_history(loops, outdoor, T0, end)
+    assert len(observations) == 3  # the 4th window is still open
+    assert all(o.source == thermal.SOURCE_HISTORY for o in observations)
+    live_by_start = {o.start: o for o in live.observations}
+    for obs in observations:
+        assert obs.slope == pytest.approx(live_by_start[obs.start].slope, abs=1e-6)
+        assert obs.duty == pytest.approx(live_by_start[obs.start].duty)
+    # Merging history into the live model adds nothing; a fresh model gets all.
+    assert live.merge(observations) == 0
+    fresh = thermal.RoomThermalModel()
+    assert fresh.merge(observations) == 3
+    assert fresh.merge(observations) == 0
+
+
+def test_backfill_skips_invalid_periods_and_unknown_action():
+    loops, outdoor, _ = _history_from_simulation()
+    end = T0 + timedelta(hours=8)
+    invalid = [(T0 + timedelta(hours=2, minutes=10), T0 + timedelta(hours=2, minutes=40))]
+    obs = thermal.observations_from_history(loops, outdoor, T0, end, invalid)
+    assert [o.start for o in obs] == [int(T0.timestamp()), int(T0.timestamp()) + 4 * 3600]
+    temps, actions = loops["climate.a"]
+    unknown = {"climate.a": (temps, [(T0, None)])}
+    assert thermal.observations_from_history(unknown, outdoor, T0, end) == []
+
+
+def test_history_start_is_latest_first_value():
+    series = {
+        "a": [(T0, None), (T0 + timedelta(hours=1), 20.0)],
+        "b": [(T0 + timedelta(hours=3), 5.0)],
+    }
+    assert thermal.history_start(series) == T0 + timedelta(hours=3)
+    assert thermal.history_start({"a": [(T0, None)]}) is None
 
 
 def test_night_period():
