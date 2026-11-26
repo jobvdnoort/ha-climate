@@ -29,6 +29,8 @@ CONF_ROOM_ID: Final = "id"
 CONF_ROOM_NAME: Final = "name"
 CONF_ROOM_CLIMATES: Final = "climates"
 CONF_ROOM_AIRCOS: Final = "aircos"
+# Optional valve position / actuator sensors (0-100 %) of the floor heating loops.
+CONF_ROOM_VALVES: Final = "valves"
 CONF_ROOM_USE_GLOBAL: Final = "use_global_night"
 CONF_ROOM_SELECT: Final = "room"
 CONF_DAY_TEMP: Final = "day_temp"
@@ -39,6 +41,33 @@ CONF_OPTIMUM_START: Final = "optimum_start"
 CONF_FIREPLACE_CLIMATE: Final = "fireplace_climate"
 CONF_FIREPLACE_TEMP_SENSOR: Final = "fireplace_temp_sensor"
 CONF_FIREPLACE_THRESHOLD: Final = "fireplace_threshold"
+
+# Optional boiler (OpenTherm) entities.
+CONF_BOILER_FLAME: Final = "boiler_flame"
+CONF_BOILER_HEAT_REQUEST: Final = "boiler_heat_request"
+CONF_BOILER_DHW: Final = "boiler_dhw"
+CONF_BOILER_MODULATION: Final = "boiler_modulation"
+CONF_BOILER_FLOW_TEMP: Final = "boiler_flow_temp"
+CONF_BOILER_FLOW_SETPOINT: Final = "boiler_flow_setpoint"
+CONF_BOILER_PRESSURE: Final = "boiler_pressure"
+CONF_BOILER_ERROR: Final = "boiler_error"
+CONF_BOILER_STARTS_TODAY: Final = "boiler_starts_today"
+CONF_BOILER_HOURS_TODAY: Final = "boiler_hours_today"
+CONF_BOILER_AVG_RUNTIME: Final = "boiler_avg_runtime"
+BOILER_KEYS: Final = (
+    CONF_BOILER_FLAME,
+    CONF_BOILER_HEAT_REQUEST,
+    CONF_BOILER_DHW,
+    CONF_BOILER_MODULATION,
+    CONF_BOILER_FLOW_TEMP,
+    CONF_BOILER_FLOW_SETPOINT,
+    CONF_BOILER_PRESSURE,
+    CONF_BOILER_ERROR,
+    CONF_BOILER_STARTS_TODAY,
+    CONF_BOILER_HOURS_TODAY,
+    CONF_BOILER_AVG_RUNTIME,
+)
+BOILER_BINARY_KEYS: Final = (CONF_BOILER_FLAME, CONF_BOILER_HEAT_REQUEST, CONF_BOILER_DHW)
 
 # --- Defaults ---------------------------------------------------------------
 DEFAULT_HEATING_LIMIT: Final = 18.0
@@ -71,6 +100,10 @@ FIREPLACE_EXCLUDE_MINUTES: Final = 30
 BASELINE_MIN_DEGREE_DAYS: Final = 1.0
 # Minimum number of usable days before a baseline is considered valid.
 BASELINE_MIN_DAYS: Final = 7
+
+# Window and resolution of the boiler chart.
+BOILER_TRACE_HOURS: Final = 24
+BOILER_TRACE_STEP: Final = timedelta(minutes=5)
 
 # --- Storage ----------------------------------------------------------------
 STORAGE_VERSION: Final = 1

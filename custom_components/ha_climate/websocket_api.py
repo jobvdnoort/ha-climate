@@ -19,6 +19,8 @@ from homeassistant.util import dt as dt_util
 
 from .calculations import parse_time
 from .const import (
+    BOILER_BINARY_KEYS,
+    BOILER_KEYS,
     CONF_BASELINE_DAYS,
     CONF_COMFORT_TIME,
     CONF_DAY_TEMP,
@@ -43,6 +45,7 @@ from .const import (
     CONF_ROOM_ID,
     CONF_ROOM_NAME,
     CONF_ROOM_USE_GLOBAL,
+    CONF_ROOM_VALVES,
     CONF_ROOMS,
     CONF_SAVINGS_START,
     DEFAULT_BASELINE_DAYS,
@@ -79,11 +82,13 @@ SETTING_KEYS = (
     CONF_FIREPLACE_CLIMATE,
     CONF_FIREPLACE_TEMP_SENSOR,
     CONF_FIREPLACE_THRESHOLD,
+    *BOILER_KEYS,
 )
 ROOM_KEYS = (
     CONF_ROOM_NAME,
     CONF_ROOM_CLIMATES,
     CONF_ROOM_AIRCOS,
+    CONF_ROOM_VALVES,
     CONF_ROOM_USE_GLOBAL,
     CONF_NIGHT_START,
     CONF_NIGHT_END,
@@ -113,6 +118,8 @@ def _date(value: Any) -> str:
 
 _TEMP = vol.Any(None, vol.All(vol.Coerce(float), vol.Range(min=5, max=30)))
 _ENTITY = vol.Any(None, "", vol.Match(r"^[a-z0-9_]+\.[a-z0-9_]+$"))
+_SENSOR = vol.Any(None, "", vol.Match(r"^sensor\.[a-z0-9_]+$"))
+_BINARY = vol.Any(None, "", vol.Match(r"^binary_sensor\.[a-z0-9_]+$"))
 
 ROOM_SCHEMA = vol.Schema(
     {
@@ -120,6 +127,7 @@ ROOM_SCHEMA = vol.Schema(
         vol.Optional(CONF_ROOM_NAME): vol.All(str, vol.Strip, vol.Length(min=1, max=64)),
         vol.Optional(CONF_ROOM_CLIMATES): [vol.Match(r"^climate\.[a-z0-9_]+$")],
         vol.Optional(CONF_ROOM_AIRCOS): [vol.Match(r"^climate\.[a-z0-9_]+$")],
+        vol.Optional(CONF_ROOM_VALVES): [vol.Match(r"^sensor\.[a-z0-9_]+$")],
         vol.Optional(CONF_ROOM_USE_GLOBAL): bool,
         vol.Optional(CONF_NIGHT_START): _time,
         vol.Optional(CONF_NIGHT_END): _time,
@@ -155,6 +163,10 @@ SETTINGS_SCHEMA = vol.Schema(
         vol.Optional(CONF_FIREPLACE_THRESHOLD): vol.All(
             vol.Coerce(float), vol.Range(min=0.1, max=5)
         ),
+        **{
+            vol.Optional(key): _BINARY if key in BOILER_BINARY_KEYS else _SENSOR
+            for key in BOILER_KEYS
+        },
     }
 )
 
@@ -169,6 +181,7 @@ def async_register_websocket_api(hass: HomeAssistant) -> None:
         ws_airco,
         ws_freeze_baseline,
         ws_history,
+        ws_boiler_trace,
         ws_save_room,
         ws_delete_room,
         ws_save_settings,
@@ -260,6 +273,9 @@ def _room_payload(coordinator: HaClimateCoordinator, room: dict[str, Any]) -> di
         "heating": measured["heating"],
         "loops": measured["loops"],
         "aircos": measured["aircos"],
+        "valves": measured["valves"],
+        "valve": _round(measured["valve"], 1),
+        "valve_max": _round(measured["valve_max"], 1),
         "airco_active": measured["airco_active"],
         "model": {
             "cooling_coefficient": _round(estimate.cooling_coefficient, 4),
@@ -349,6 +365,7 @@ async def ws_state(hass, connection, msg, entry: HaClimateConfigEntry) -> None:
                 "rise": _round(detector.rise, 2),
                 "minutes_today": coordinator.fireplace_minutes_today(),
             },
+            "boiler": coordinator.boiler_status(),
             "rooms": [_room_payload(coordinator, room) for room in coordinator.rooms],
             "ranking": coordinator.room_ranking(),
             "now": dt_util.now().isoformat(),
@@ -369,6 +386,25 @@ async def ws_history(hass, connection, msg, entry: HaClimateConfigEntry) -> None
     """Return per-day analytics."""
     rows = await entry.runtime_data.async_history(msg["days"])
     connection.send_result(msg["id"], {"days": rows})
+
+
+@websocket_api.websocket_command(
+    {vol.Required("type"): "ha_climate/boiler/trace", vol.Optional("entry_id"): str}
+)
+@websocket_api.async_response
+@_with_entry
+async def ws_boiler_trace(hass, connection, msg, entry: HaClimateConfigEntry) -> None:
+    """Return the last 24 h of the boiler sensors (5 minute grid)."""
+    coordinator = entry.runtime_data
+    if not coordinator.boiler_configured:
+        connection.send_result(msg["id"], {"points": []})
+        return
+    try:
+        points = await coordinator.async_boiler_trace()
+    except Exception:  # noqa: BLE001
+        _LOGGER.exception("Reading boiler history failed")
+        points = []
+    connection.send_result(msg["id"], {"points": points})
 
 
 # ---------------------------------------------------------------------------
@@ -406,6 +442,15 @@ def _validate_room(
     }
     if aircos & (used_any | set(climates)):
         return "Een airco is al als lus of in een andere kamer gekoppeld."
+    valves = set(room.get(CONF_ROOM_VALVES) or [])
+    used_valves = {
+        entity
+        for r in rooms
+        if r[CONF_ROOM_ID] != room_id
+        for entity in r.get(CONF_ROOM_VALVES, [])
+    }
+    if valves & used_valves:
+        return "Een klepstand-sensor is al aan een andere ruimte gekoppeld."
     day, night = room.get(CONF_DAY_TEMP), room.get(CONF_NIGHT_TEMP)
     if day is not None and night is not None and night >= day:
         return "De nachttemperatuur moet lager zijn dan de dagtemperatuur."

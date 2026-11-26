@@ -43,6 +43,7 @@ from .const import (
     CONF_ROOM_NAME,
     CONF_ROOM_SELECT,
     CONF_ROOM_USE_GLOBAL,
+    CONF_ROOM_VALVES,
     CONF_ROOMS,
     DEFAULT_BASELINE_DAYS,
     DEFAULT_COMFORT_TIME,
@@ -195,6 +196,11 @@ def _room_schema(values: dict[str, Any], defaults: dict[str, Any]) -> vol.Schema
                 CONF_ROOM_AIRCOS, description=_suggest(values, CONF_ROOM_AIRCOS)
             ): selector.EntitySelector(
                 selector.EntitySelectorConfig(domain="climate", multiple=True)
+            ),
+            vol.Optional(
+                CONF_ROOM_VALVES, description=_suggest(values, CONF_ROOM_VALVES)
+            ): selector.EntitySelector(
+                selector.EntitySelectorConfig(domain="sensor", multiple=True)
             ),
             vol.Required(
                 CONF_ROOM_USE_GLOBAL, default=values.get(CONF_ROOM_USE_GLOBAL, True)
@@ -415,7 +421,13 @@ class HaClimateOptionsFlow(OptionsFlow):
             errors = self._validate_room(user_input, self._room_id)
             if not errors:
                 room.update(
-                    {CONF_DAY_TEMP: None, CONF_NIGHT_TEMP: None, CONF_ROOM_AIRCOS: [], **user_input}
+                    {
+                        CONF_DAY_TEMP: None,
+                        CONF_NIGHT_TEMP: None,
+                        CONF_ROOM_AIRCOS: [],
+                        CONF_ROOM_VALVES: [],
+                        **user_input,
+                    }
                 )
                 return self._save({CONF_ROOMS: rooms})
         return self.async_show_form(

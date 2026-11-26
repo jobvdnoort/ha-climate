@@ -13,6 +13,7 @@ from homeassistant.const import STATE_ON, STATE_UNAVAILABLE, STATE_UNKNOWN
 from homeassistant.core import HomeAssistant, State
 from homeassistant.util import dt as dt_util
 
+from .boiler import resample
 from .const import AIRCO_ACTIVE_ACTIONS
 from .thermal import Series, history_start, observations_from_history
 
@@ -87,6 +88,7 @@ async def async_backfill_observations(
     outdoor_sensor: str,
     fireplace_entity: str | None = None,
     aircos: list[str] | None = None,
+    valves: list[str] | None = None,
 ) -> tuple[list, dict[str, Any]]:
     """Compute thermal observations from the recorder history of a room.
 
@@ -100,6 +102,7 @@ async def async_backfill_observations(
     if fireplace_entity:
         entity_ids.append(fireplace_entity)
     entity_ids.extend(aircos or [])
+    entity_ids.extend(valves or [])
 
     states: dict[str, list[State]] = await recorder.async_add_executor_job(
         partial(
@@ -140,8 +143,64 @@ async def async_backfill_observations(
     )
     for airco in aircos or []:
         invalid.extend(_airco_periods(states.get(airco, []), end))
+    valve_series: list[Series] = [
+        [(s.last_updated, _float(s.state)) for s in states.get(valve, [])]
+        for valve in valves or []
+    ]
     observations = await hass.async_add_executor_job(
-        observations_from_history, loops, outdoor, first, end, invalid
+        observations_from_history, loops, outdoor, first, end, invalid, valve_series
     )
     summary["windows"] = len(observations)
     return observations, summary
+
+
+async def async_boiler_trace(
+    hass: HomeAssistant,
+    numeric: dict[str, str],
+    binary: dict[str, str],
+    valves: list[str],
+    hours: int,
+    step: timedelta,
+) -> list[dict[str, Any]]:
+    """Resampled history of the boiler sensors (and the highest valve position).
+
+    ``numeric`` and ``binary`` map a column name to an entity id.
+    """
+    end = dt_util.utcnow()
+    start = end - timedelta(hours=hours)
+    entity_ids = list({*numeric.values(), *binary.values(), *valves})
+    if not entity_ids:
+        return []
+    recorder = get_instance(hass)
+    states: dict[str, list[State]] = await recorder.async_add_executor_job(
+        partial(
+            history.get_significant_states,
+            hass,
+            start,
+            end,
+            entity_ids,
+            include_start_time_state=True,
+            significant_changes_only=False,
+            minimal_response=False,
+            no_attributes=True,
+        )
+    )
+
+    def series(entity_id: str, convert) -> Series:
+        return [(s.last_updated, convert(s.state)) for s in states.get(entity_id, [])]
+
+    def on_off(value: str) -> float | None:
+        if value in (STATE_UNAVAILABLE, STATE_UNKNOWN):
+            return None
+        return 1.0 if value == STATE_ON else 0.0
+
+    columns: dict[str, Any] = {
+        key: series(entity_id, _float) for key, entity_id in numeric.items()
+    }
+    columns.update({key: series(entity_id, on_off) for key, entity_id in binary.items()})
+    if valves:
+        columns["valve_max"] = [series(valve, _float) for valve in valves]
+    # Align the grid on whole steps so the chart labels are round times.
+    seconds = int(step.total_seconds())
+    first = dt_util.utc_from_timestamp((int(start.timestamp()) // seconds + 1) * seconds)
+    return await hass.async_add_executor_job(resample, columns, first, end, step)

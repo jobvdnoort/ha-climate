@@ -109,13 +109,15 @@
           "night_temp": "Vaste nachttemperatuur (optioneel)",
           "comfort_time": "Op temperatuur om",
           "optimum_start": "Optimum start",
-          "aircos": "Airco's (koelen / snel bijverwarmen)"
+          "aircos": "Airco's (koelen / snel bijverwarmen)",
+          "valves": "Klepstand / stelgraad-sensoren (%)"
         },
         "data_description": {
           "use_global_night": "Uitzetten om hieronder eigen tijden en verlaging voor deze ruimte te gebruiken.",
           "night_temp": "Indien ingevuld wordt deze temperatuur 's nachts ingesteld in plaats van de relatieve verlaging.",
           "optimum_start": "Start de verwarming automatisch op basis van het geleerde thermische model, zodat de kamer om de ingestelde tijd op dagtemperatuur is.",
-          "aircos": "Optioneel. Airco's doen niet mee met nachtverlaging, schema's of optimum start; periodes waarin een airco verwarmt of koelt worden uitgesloten van het vloerverwarmingsmodel."
+          "aircos": "Optioneel. Airco's doen niet mee met nachtverlaging, schema's of optimum start; periodes waarin een airco verwarmt of koelt worden uitgesloten van het vloerverwarmingsmodel.",
+          "valves": "Optioneel. Klepstand- of stelgraad-sensoren (0–100 %) van de vloerverwarmingslussen (bijv. KNX-actoren). Indien ingesteld wordt de gemiddelde klepopening gebruikt voor het stookpercentage en het thermische model."
         }
       },
       "room": {
@@ -132,13 +134,15 @@
           "night_temp": "Vaste nachttemperatuur (optioneel)",
           "comfort_time": "Op temperatuur om",
           "optimum_start": "Optimum start",
-          "aircos": "Airco's (koelen / snel bijverwarmen)"
+          "aircos": "Airco's (koelen / snel bijverwarmen)",
+          "valves": "Klepstand / stelgraad-sensoren (%)"
         },
         "data_description": {
           "use_global_night": "Uitzetten om hieronder eigen tijden en verlaging voor deze ruimte te gebruiken.",
           "night_temp": "Indien ingevuld wordt deze temperatuur 's nachts ingesteld in plaats van de relatieve verlaging.",
           "optimum_start": "Start de verwarming automatisch op basis van het geleerde thermische model, zodat de kamer om de ingestelde tijd op dagtemperatuur is.",
-          "aircos": "Optioneel. Airco's doen niet mee met nachtverlaging, schema's of optimum start; periodes waarin een airco verwarmt of koelt worden uitgesloten van het vloerverwarmingsmodel."
+          "aircos": "Optioneel. Airco's doen niet mee met nachtverlaging, schema's of optimum start; periodes waarin een airco verwarmt of koelt worden uitgesloten van het vloerverwarmingsmodel.",
+          "valves": "Optioneel. Klepstand- of stelgraad-sensoren (0–100 %) van de vloerverwarmingslussen (bijv. KNX-actoren). Indien ingesteld wordt de gemiddelde klepopening gebruikt voor het stookpercentage en het thermische model."
         }
       },
       "edit_room": {

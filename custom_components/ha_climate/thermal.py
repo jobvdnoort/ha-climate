@@ -14,7 +14,9 @@ The room temperature is described by a first order model::
   inside and outside temperature would be equal.
 * ``duty`` – fraction of time the floor heating was heating (0–1). Floor
   heating thermostats often modulate (PWM), so the duty cycle is used instead
-  of requiring long uninterrupted heating periods.
+  of requiring long uninterrupted heating periods. When valve position sensors
+  (0–100 %) are configured, the mean valve opening is used as the heating
+  intensity instead of the on/off ``hvac_action``.
 
 The room is sampled every minute. Samples are grouped in windows on a fixed
 2 h grid (00:00, 02:00, … UTC); every valid, gap-free window yields one
@@ -211,7 +213,7 @@ def fit_model(observations: list[Observation]) -> ModelEstimate:
 
 
 def observation_from_samples(
-    samples: list[tuple[datetime, float, float, bool]], start: int, source: str
+    samples: list[tuple[datetime, float, float, float]], start: int, source: str
 ) -> Observation | None:
     """Turn the samples of one grid window into an observation (or None)."""
     if len(samples) < MIN_SAMPLES:
@@ -220,7 +222,7 @@ def observation_from_samples(
         return None
     observation = Observation(
         slope=_slope_per_hour([(s[0], s[1]) for s in samples]),
-        duty=sum(1 for s in samples if s[3]) / len(samples),
+        duty=sum(s[3] for s in samples) / len(samples),
         delta_t=sum(s[1] - s[2] for s in samples) / len(samples),
         start=start,
         source=source,
@@ -230,6 +232,13 @@ def observation_from_samples(
     return observation
 
 
+def _intensity(heating: bool | float) -> float:
+    """Heating as a fraction 0–1 (on/off or valve position)."""
+    if isinstance(heating, bool):
+        return 1.0 if heating else 0.0
+    return max(0.0, min(1.0, float(heating)))
+
+
 class WindowCollector:
     """Groups minute samples into fixed 2 h grid windows."""
 
@@ -237,7 +246,7 @@ class WindowCollector:
         """Initialize."""
         self.source = source
         self._slot: int | None = None
-        self._samples: list[tuple[datetime, float, float, bool]] = []
+        self._samples: list[tuple[datetime, float, float, float]] = []
         self._valid = True
 
     def reset(self) -> None:
@@ -251,10 +260,14 @@ class WindowCollector:
         ts: datetime,
         inside: float | None,
         outside: float | None,
-        heating: bool | None,
+        heating: bool | float | None,
         valid: bool = True,
     ) -> Observation | None:
-        """Add a sample; returns the observation of a window that just closed."""
+        """Add a sample; returns the observation of a window that just closed.
+
+        ``heating`` is on/off (``hvac_action``) or a heating intensity 0–1
+        (valve position).
+        """
         slot = window_start(ts)
         finished = None
         if self._slot is not None and slot != self._slot:
@@ -268,7 +281,7 @@ class WindowCollector:
         elif self._samples and ts - self._samples[-1][0] > MAX_GAP:
             self._valid = False
         elif self._valid:
-            self._samples.append((ts, inside, outside, bool(heating)))
+            self._samples.append((ts, inside, outside, _intensity(heating)))
         return finished
 
     def flush(self) -> Observation | None:
@@ -342,7 +355,7 @@ class RoomThermalModel:
         ts: datetime,
         inside: float | None,
         outside: float | None,
-        heating: bool | None,
+        heating: bool | float | None,
         valid: bool = True,
     ) -> Observation | None:
         """Add a live measurement; returns a new observation when a window completes."""
@@ -427,12 +440,15 @@ def resample_history(
     start: datetime,
     end: datetime,
     invalid: list[tuple[datetime, datetime]] = (),
-) -> Iterator[tuple[datetime, float | None, float | None, bool | None, bool]]:
+    valves: list[Series] = (),
+) -> Iterator[tuple[datetime, float | None, float | None, bool | float | None, bool]]:
     """Yield per-minute (ts, inside, outside, heating, valid) samples.
 
     ``loops`` maps each climate entity to two change lists: its
     ``current_temperature`` and its ``hvac_action``. Values are held until the
-    next change; ``None`` means unknown/unavailable.
+    next change; ``None`` means unknown/unavailable. ``valves`` are change lists
+    of valve positions (0–100 %); when known, their mean is the heating
+    intensity instead of the ``hvac_action``.
     """
     first = start.replace(second=0, microsecond=0)
     if first < start:
@@ -447,12 +463,18 @@ def resample_history(
     temps = [_step(t, minutes) for t, _ in loops.values()]
     actions = [_step(a, minutes) for _, a in loops.values()]
     outside = _step(outdoor, minutes)
+    positions = [_step(v, minutes) for v in valves]
     invalid = sorted(invalid)
     for i, minute in enumerate(minutes):
         current = [t[i] for t in temps if isinstance(t[i], (int, float))]
         inside = sum(current) / len(current) if current else None
         known = [a[i] for a in actions if a[i] not in (None, "", "unknown", "unavailable")]
-        heating = any(a in HEATING_ACTIONS for a in known) if known else None
+        heating: bool | float | None = (
+            any(a in HEATING_ACTIONS for a in known) if known else None
+        )
+        opened = [p[i] for p in positions if isinstance(p[i], (int, float))]
+        if opened:
+            heating = sum(opened) / len(opened) / 100
         out = outside[i] if isinstance(outside[i], (int, float)) else None
         valid = not any(s <= minute < e for s, e in invalid)
         yield minute, inside, out, heating, valid
@@ -464,11 +486,12 @@ def observations_from_history(
     start: datetime,
     end: datetime,
     invalid: list[tuple[datetime, datetime]] = (),
+    valves: list[Series] = (),
 ) -> list[Observation]:
     """Compute observations from recorder history (source = history)."""
     collector = WindowCollector(SOURCE_HISTORY)
     result: list[Observation] = []
-    for sample in resample_history(loops, outdoor, start, end, invalid):
+    for sample in resample_history(loops, outdoor, start, end, invalid, valves):
         if (obs := collector.add(*sample)) is not None:
             result.append(obs)
     # The last (incomplete) window is left to the live collector.

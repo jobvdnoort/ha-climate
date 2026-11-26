@@ -28,10 +28,10 @@ Na installatie verschijnt **HA Climate** (thermostaat-icoon) in de linkerzijbalk
 
 | Tabblad | Inhoud |
 |---|---|
-| **Kamers** | Kaart per kamer met huidige temperatuur, doeltemperatuur (met **−/+** in stappen van 0,5 °C die direct alle vloerverwarmingslussen van de kamer tegelijk instellen), dagtemperatuur, status (verwarmen / voorverwarmen / nachtverlaging / openhaard actief) en modelbetrouwbaarheid. Heeft de kamer een airco, dan verschijnt een airco-sectie met status, **Uit / Koelen / Boost** en een eigen −/+. Kamers toevoegen, bewerken en verwijderen; nachtverlaging per kamer of voor alle thermostaten schakelen. |
-| **Analyses** | Totale gaskosten (variabel + vast) voor vandaag, gisteren en de gekozen periode; variabele besparing; interactieve grafieken (met tooltips) van graaddagen vs. werkelijk en verwacht gasverbruik en de cumulatieve besparing in m³ of €. Per kamer (selector) een **Model status**-kaart: confidence, aantal meetpunten (uit historie / live), 3-stappen voortgang (*Data verzamelen → Kamer leren → Voorspellend regelen*), afkoelsnelheid/warmteverlies, opwarmsnelheid en tijdconstante. Bij de baseline en elk kamermodel staat vanaf welke datum en over hoeveel dagen/meetpunten gerekend wordt. **Vergelijking kamers** rangschikt de ruimtes van minst naar meest zuinig (warmteverlies en stookpercentage) met een label. Gebeurtenissen (nachtverlaging aan/uit, gewijzigde instellingen, baseline bevroren) staan als markeringen in de grafieken. De tooltip van de gasgrafiek toont ook de gemiddelde binnen- en doeltemperatuur. Knoppen voor **Baseline bevriezen** (met startdatum) en **Exporteer CSV**. Periode 14 – 365 dagen. |
+| **Kamers** | Kaart per kamer met huidige temperatuur, doeltemperatuur (met **−/+** in stappen van 0,5 °C die direct alle vloerverwarmingslussen van de kamer tegelijk instellen), dagtemperatuur, status (verwarmen / voorverwarmen / nachtverlaging / openhaard actief) en modelbetrouwbaarheid. Heeft de kamer een airco, dan verschijnt een airco-sectie met status, **Uit / Koelen / Boost** en een eigen −/+. Zijn er klepstand-sensoren gekoppeld, dan staat de actuele (gemiddelde en hoogste) klepstand in % op de kaart. Kamers toevoegen, bewerken en verwijderen; nachtverlaging per kamer of voor alle thermostaten schakelen. |
+| **Analyses** | Totale gaskosten (variabel + vast) voor vandaag, gisteren en de gekozen periode; variabele besparing; interactieve grafieken (met tooltips) van graaddagen vs. werkelijk en verwacht gasverbruik en de cumulatieve besparing in m³ of €. Per kamer (selector) een **Model status**-kaart: confidence, aantal meetpunten (uit historie / live), 3-stappen voortgang (*Data verzamelen → Kamer leren → Voorspellend regelen*), afkoelsnelheid/warmteverlies, opwarmsnelheid en tijdconstante. Bij de baseline en elk kamermodel staat vanaf welke datum en over hoeveel dagen/meetpunten gerekend wordt. **Vergelijking kamers** rangschikt de ruimtes van minst naar meest zuinig (warmteverlies en stookpercentage) met een label. Gebeurtenissen (nachtverlaging aan/uit, gewijzigde instellingen, baseline bevroren) staan als markeringen in de grafieken. De tooltip van de gasgrafiek toont ook de gemiddelde binnen- en doeltemperatuur. Knoppen voor **Baseline bevriezen** (met startdatum) en **Exporteer CSV**. Periode 14 – 365 dagen. Alleen als er een ketel is ingesteld: de sectie **Ketel & efficiëntie** (zie hieronder). |
 | **Schema's** | Per kamer: dagtemperatuur, nachttemperatuur (vast) of verlaging (relatief), eigen tijden of de algemene, "op temperatuur om"-tijd en Optimum Start, met de geplande starttijd. |
-| **Instellingen** | Buitentemperatuur- en gassensor, gasprijs (vast of entiteit), stookgrens, historie, algemene nachtverlaging en openhaard. |
+| **Instellingen** | Buitentemperatuur- en gassensor, gasprijs (vast of entiteit), stookgrens, historie, algemene nachtverlaging, openhaard en de inklapbare sectie **Ketel / OpenTherm (optioneel)**. |
 
 Wijzigingen vereisen een beheerdersaccount; andere gebruikers zien het paneel alleen-lezen. Het paneel praat met de integratie via een eigen WebSocket API (`ha_climate/state`, `ha_climate/history`, `ha_climate/room/save`, …).
 
@@ -56,6 +56,38 @@ Alles hieronder kan ook in het zijbalk-paneel. Via **Configureren** (options flo
 * **Ruimtes toevoegen/bewerken/verwijderen** – elke ruimte bevat één of meer `climate`-entiteiten (vloerverwarmingslussen) en kan de algemene nachtverlaging gebruiken of eigen tijden/verlaging hebben, plus optioneel een dag- en nachttemperatuur, "op temperatuur om" en Optimum Start.
 * **Openhaard** – kies de thermostaat van de openhaard-ruimte, optioneel een losse temperatuursensor, en de drempel (standaard +0,5 °C).
 * Sensoren, prijs, stookgrens en standaard-nachtverlaging wijzigen.
+
+## Ketel (OpenTherm) en klepstanden – optioneel
+
+Beide uitbreidingen zijn volledig optioneel: zonder ketel- of klepstand-entiteiten verandert er niets aan de werking of het paneel.
+
+**Ketel / OpenTherm** (Instellingen → *Ketel / OpenTherm (optioneel)*), bijvoorbeeld via OpenTherm Gateway of ems-esp:
+
+| Instelling | Domein | Voorbeeld |
+|---|---|---|
+| Brander / vlamstatus | `binary_sensor` | `cv_vlam_status` |
+| Warmtevraag | `binary_sensor` | `ot_heat_request` |
+| Tapwater / warm water status | `binary_sensor` | `cv_warm_water_status` |
+| Modulatie (%) | `sensor` | `cv_degree_of_modulation` |
+| Werkelijke / gevraagde aanvoertemperatuur (°C) | `sensor` | `cv_h1_water_temperatuur` / `cv_h1_flow_setpoint_value` |
+| Waterdruk (bar) en foutcode | `sensor` | `cv_waterdruk` / `cv_error_code` |
+| Starts vandaag, branduren vandaag, gem. looptijd | `sensor` | optioneel; anders berekent HA Climate deze zelf uit de vlamstatus |
+
+Op het tabblad **Analyses** verschijnt dan **Ketel & efficiëntie** met:
+
+* een statusbalk: brander (verwarming/tapwater, lopende run), warmtevraag, modulatie, aanvoer vs. gevraagd, waterdruk (rood onder 1,2 bar) en foutcode;
+* KPI's: branderstarts per dag, branduren, gemiddelde looptijd per start (waarschuwing **pendelen** bij gemiddeld < 10 min met ≥ 3 starts, runs < 10 min tellen als korte run) en gemiddelde aanvoertemperatuur/modulatie tijdens branden;
+* **tapwater vs. verwarming** (minuten en %) voor vandaag en de gekozen periode – opgeslagen per dag en meegenomen in de CSV-export (`ketel_*`-kolommen);
+* een grafiek van de laatste 24 uur (uit de recorder): aanvoertemperatuur, gevraagde aanvoer, modulatie, de hoogste kamer-klepstand en de periodes dat de brander aan was;
+* een grafiek van starts en branduren per dag.
+
+Starts worden geteld bij elke wisseling van de vlamstatus (niet alleen per minuut); branduren, tapwater- en verwarmingstijd per minuut. Tellers van de ketel zelf (indien ingesteld) gaan voor.
+
+**Klepstand / stelgraad per kamer** (kamer toevoegen/bewerken): koppel één of meer `sensor`-entiteiten (0–100 %) van de vloerverwarmingsactoren, bijv. KNX. Dan
+
+* gebruikt het thermische model de gemiddelde klepopening als verwarmingsintensiteit (in plaats van aan/uit uit `hvac_action`), ook bij het terugrekenen uit de recorder-historie – dat geeft een nauwkeurigere opwarmsnelheid;
+* is het **stookpercentage** in de kamervergelijking de gemiddelde klepopening;
+* staat de actuele klepstand op de kamerkaart.
 
 ## Entiteiten
 
@@ -113,7 +145,7 @@ Meetmomenten met gaten, onbekende `hvac_action` of een brandende openhaard worde
 
 **Wijzigingslogboek.** Nachtverlaging aan/uit (globaal of per kamer), gewijzigde nachtinstellingen (tijden, verlaging, nachttemperatuur, optimum start – ongeacht of dat via het paneel of de options flow gebeurt) en het bevriezen van de baseline worden permanent opgeslagen en in de grafieken en de export getoond.
 
-**CSV-export.** *Exporteer CSV* downloadt alle opgeslagen dagen (UTF-8, komma-gescheiden, punt als decimaalteken) met: datum, gemiddelde buiten-, binnen- en doeltemperatuur, stookgrens, graaddagen, werkelijk en verwacht gasverbruik, besparing (m³ en €), variabele, vaste en totale kosten, openhaard-minuten, nachtverlaging (ja/nee) en de gebeurtenissen van die dag.
+**CSV-export.** *Exporteer CSV* downloadt alle opgeslagen dagen (UTF-8, komma-gescheiden, punt als decimaalteken) met: datum, gemiddelde buiten-, binnen- en doeltemperatuur, stookgrens, graaddagen, werkelijk en verwacht gasverbruik, besparing (m³ en €), variabele, vaste en totale kosten, openhaard-minuten, nachtverlaging (ja/nee) en de gebeurtenissen van die dag. Met een ingestelde ketel komen daar per dag bij: starts, branduren, gemiddelde looptijd, korte runs, tapwater- en verwarmingsminuten, tapwater-% en gemiddelde aanvoertemperatuur en modulatie.
 
 **Besparing totaal** telt de besparing (verwacht − werkelijk) van alle afgeronde dagen sinds de startdatum van de besparing (of anders de installatie) plus vandaag tot nu. Gemiste dagen worden bij het herberekenen van de baseline aangevuld uit de statistieken. De baseline krijgt al vanaf één bruikbare dag een waarde (zodat sensoren niet op "onbekend" blijven staan) en is vanaf 7 dagen "betrouwbaar". Negatieve dagverbruiken (meterwissel of -reset) worden genegeerd.
 
@@ -124,7 +156,7 @@ pip install pytest
 pytest
 ```
 
-De unit tests in `tests/` testen de pure rekenlogica (graaddagen, baseline, openhaard, nachtverlaging, thermisch model en Optimum Start) zonder Home Assistant. End-to-end tests met een echte Home Assistant-testinstantie (config flow, opties, paneel-registratie, WebSocket API, nachtverlaging, Optimum Start en het herstellen van de totale besparing) staan in `tests_integration/`:
+De unit tests in `tests/` testen de pure rekenlogica (graaddagen, baseline, openhaard, nachtverlaging, thermisch model, Optimum Start, ketel-tracking en klepstanden) zonder Home Assistant. End-to-end tests met een echte Home Assistant-testinstantie (config flow, opties, paneel-registratie, WebSocket API, nachtverlaging, Optimum Start en het herstellen van de totale besparing) staan in `tests_integration/`:
 
 ```bash
 pip install -r requirements_test.txt
