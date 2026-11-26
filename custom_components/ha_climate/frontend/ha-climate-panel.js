@@ -9,6 +9,7 @@
 const TABS = [
   { id: "rooms", label: "Kamers", icon: "M10,20V14H14V20H19V12H22L12,3L2,12H5V20H10Z" },
   { id: "analytics", label: "Analyses", icon: "M22,21H2V3H4V19H6V10H10V19H12V6H16V19H18V14H22V21Z" },
+  { id: "tips", label: "Tips", icon: "M12,2A7,7 0 0,0 5,9C5,11.38 6.19,13.47 8,14.74V17A1,1 0 0,0 9,18H15A1,1 0 0,0 16,17V14.74C17.81,13.47 19,11.38 19,9A7,7 0 0,0 12,2M9,21A1,1 0 0,0 10,22H14A1,1 0 0,0 15,21V20H9V21Z" },
   { id: "schedules", label: "Schema's", icon: "M12,20A8,8 0 0,0 20,12A8,8 0 0,0 12,4A8,8 0 0,0 4,12A8,8 0 0,0 12,20M12,2A10,10 0 0,1 22,12A10,10 0 0,1 12,22C6.47,22 2,17.5 2,12A10,10 0 0,1 12,2M12.5,7V12.25L17,14.92L16.25,16.15L11,13V7H12.5Z" },
   { id: "settings", label: "Instellingen", icon: "M12,15.5A3.5,3.5 0 0,1 8.5,12A3.5,3.5 0 0,1 12,8.5A3.5,3.5 0 0,1 15.5,12A3.5,3.5 0 0,1 12,15.5M19.43,12.97C19.47,12.65 19.5,12.33 19.5,12C19.5,11.67 19.47,11.34 19.43,11L21.54,9.37C21.73,9.22 21.78,8.95 21.66,8.73L19.66,5.27C19.54,5.05 19.27,4.96 19.05,5.05L16.56,6.05C16.04,5.66 15.5,5.32 14.87,5.07L14.5,2.42C14.46,2.18 14.25,2 14,2H10C9.75,2 9.54,2.18 9.5,2.42L9.13,5.07C8.5,5.32 7.96,5.66 7.44,6.05L4.95,5.05C4.73,4.96 4.46,5.05 4.34,5.27L2.34,8.73C2.21,8.95 2.27,9.22 2.46,9.37L4.57,11C4.53,11.34 4.5,11.67 4.5,12C4.5,12.33 4.53,12.65 4.57,12.97L2.46,14.63C2.27,14.78 2.21,15.05 2.34,15.27L4.34,18.73C4.46,18.95 4.73,19.03 4.95,18.95L7.44,17.94C7.96,18.34 8.5,18.68 9.13,18.93L9.5,21.58C9.54,21.82 9.75,22 10,22H14C14.25,22 14.46,21.82 14.5,21.58L14.87,18.93C15.5,18.67 16.04,18.34 16.56,17.94L19.05,18.95C19.27,19.03 19.54,18.95 19.66,18.73L21.66,15.27C21.78,15.05 21.73,14.78 21.54,14.63L19.43,12.97Z" },
 ];
@@ -101,6 +102,43 @@ const dateLabel = (iso) => {
   }
 };
 
+const daysBetween = (fromIso, toIso) =>
+  Math.round((new Date(`${toIso}T12:00:00`) - new Date(`${fromIso}T12:00:00`)) / 86400000);
+
+/*
+ * Combine the change log of a day into readable lines: a night setting that
+ * was changed for the whole house and every room at the same moment becomes
+ * one line, and internal baseline bookkeeping is left out.
+ */
+const summarizeEvents = (list) => {
+  const out = [];
+  const groups = new Map();
+  for (const e of list || []) {
+    if (e.type === "baseline") continue;
+    const m = e.type === "settings" && /^Nachtverlaging(?: (.+?))? (ingesteld|aangepast): (.+)$/.exec(e.text);
+    if (!m) {
+      out.push({ time: e.time, text: e.text });
+      continue;
+    }
+    const key = `${timeOf(e.time)}|${m[3]}`;
+    let g = groups.get(key);
+    if (!g) {
+      g = { time: e.time, verb: m[2], desc: m[3], rooms: [], global: false };
+      groups.set(key, g);
+      out.push(g);
+    }
+    if (m[1]) g.rooms.push(m[1]);
+    else g.global = true;
+  }
+  return out.map((g) => {
+    if (g.desc === undefined) return g;
+    let who = "";
+    if (g.global) who = g.rooms.length ? ` (algemeen + ${g.rooms.length} kamer${g.rooms.length === 1 ? "" : "s"})` : " (algemeen)";
+    else who = g.rooms.length > 2 ? ` (${g.rooms.length} kamers)` : ` (${g.rooms.join(", ")})`;
+    return { time: g.time, text: `Nachtverlaging ${g.verb}: ${g.desc}${who}` };
+  });
+};
+
 const hhmm = (value, fallback = "") => (value ? String(value).slice(0, 5) : fallback);
 
 const numOrNull = (value) => {
@@ -126,6 +164,8 @@ class HaClimatePanel extends HTMLElement {
     this._pendingAirco = {};
     this._tempTimers = {};
     this._boilerTrace = null;
+    this._advice = null;
+    this._editing = false;
   }
 
   /* ---------- Home Assistant properties ---------- */
@@ -153,7 +193,7 @@ class HaClimatePanel extends HTMLElement {
 
   connectedCallback() {
     this._timer = setInterval(() => {
-      if (!this._dialog && !this._dirty && !this._busy && document.visibilityState === "visible") this._refresh(true);
+      if (!this._dialog && !this._dirty && !this._busy && !this._editing && document.visibilityState === "visible") this._refresh(true);
     }, 30000);
     this._resize = new ResizeObserver(() => {
       if (this._tab === "analytics") this._renderCharts();
@@ -193,6 +233,7 @@ class HaClimatePanel extends HTMLElement {
       this._state = await this._ws({ type: "ha_climate/state" });
       this._error = null;
       if (this._tab === "analytics") await this._loadHistory();
+      if (this._tab === "tips") await this._loadAdvice();
     } catch (err) {
       this._error = err?.message || "HA Climate is niet geladen.";
     }
@@ -210,6 +251,15 @@ class HaClimatePanel extends HTMLElement {
     } catch (err) {
       this._history = [];
       this._toast(err?.message || "Kon historie niet laden", true);
+    }
+  }
+
+  async _loadAdvice(refresh = false) {
+    try {
+      this._advice = await this._ws({ type: "ha_climate/advice", refresh });
+      this._adviceError = null;
+    } catch (err) {
+      this._adviceError = err?.message || "Tips konden niet worden berekend";
     }
   }
 
@@ -311,6 +361,8 @@ class HaClimatePanel extends HTMLElement {
         return this._renderSchedules();
       case "settings":
         return this._renderSettings();
+      case "tips":
+        return this._renderTips();
       default:
         return this._renderRooms();
     }
@@ -349,12 +401,13 @@ class HaClimatePanel extends HTMLElement {
           <div class="temps">
             <div><div class="big">${fmt(room.current_temperature, 1)}<small>°C</small></div><div class="muted">huidig</div></div>
             <div class="setpoint" data-room-setpoint="${room.id}">
-              <div class="mid"><span class="sp-value">${fmt(this._pendingTemp[room.id] ?? room.target_temperature, 1)}</span><small>°C</small></div>
+              <div class="thermo">
+                ${admin ? `<button class="step-btn" data-action="room-temp" data-room="${room.id}" data-delta="-0.5" aria-label="Doeltemperatuur lager">−</button>` : ""}
+                <button class="sp-btn" data-action="edit-temp" data-kind="room" data-room="${room.id}" ${admin ? 'title="Klik om een temperatuur in te typen"' : "disabled"}>
+                  <span class="sp-value">${fmt(this._pendingTemp[room.id] ?? room.target_temperature, 1)}</span><small>°C</small></button>
+                ${admin ? `<button class="step-btn" data-action="room-temp" data-room="${room.id}" data-delta="0.5" aria-label="Doeltemperatuur hoger">+</button>` : ""}
+              </div>
               <div class="muted"><span class="sp-label">doel nu</span></div>
-              ${admin ? `<div class="stepper">
-                <button class="step-btn" data-action="room-temp" data-room="${room.id}" data-delta="-0.5" aria-label="Doeltemperatuur lager">−</button>
-                <button class="step-btn" data-action="room-temp" data-room="${room.id}" data-delta="0.5" aria-label="Doeltemperatuur hoger">+</button>
-              </div>` : ""}
             </div>
             <div><div class="mid">${fmt(room.comfort_temperature, 1)}<small>°C</small></div><div class="muted">dag</div></div>
           </div>
@@ -429,8 +482,10 @@ class HaClimatePanel extends HTMLElement {
     const btn = (m, label) => `<button class="seg ${mode === (m === "boost" ? "heat" : m) ? "active" : ""}" data-action="airco-mode" data-room="${room.id}" data-mode="${m}" ${admin ? "" : "disabled"}>${label}</button>`;
     return `<div class="airco">
       <div class="airco-head"><span class="airco-title">❄ Airco ${room.airco_active ? '<span class="chip" style="--chip:#29b6f6">actief · niet in model</span>' : ""}</span>
-        ${admin ? `<span class="stepper">
+        ${admin && room.aircos.some((a) => a.available) ? `<span class="thermo small" data-airco-setpoint="${room.id}">
           <button class="step-btn" data-action="airco-temp" data-room="${room.id}" data-delta="-0.5" aria-label="Airco lager">−</button>
+          <button class="sp-btn" data-action="edit-temp" data-kind="airco" data-room="${room.id}" title="Klik om een temperatuur in te typen">
+            <span class="sp-value">${fmt(this._pendingAirco[room.id] ?? room.aircos.find((a) => a.available)?.target_temperature, 1)}</span><small>°C</small></button>
           <button class="step-btn" data-action="airco-temp" data-room="${room.id}" data-delta="0.5" aria-label="Airco hoger">+</button></span>` : ""}
       </div>
       ${list}
@@ -522,7 +577,6 @@ class HaClimatePanel extends HTMLElement {
     const periodCost = sum("cost");
     const periodVariable = sum("cost_variable");
     const periodGas = sum("gas");
-    const periodSaved = sum("saved");
     const fixed = e.fixed_costs ?? 0;
     const costTile = (title, total, gas, days) => `
       <div class="card stat"><div class="muted">${title}</div><div class="big">${euro(total)}</div>
@@ -537,37 +591,28 @@ class HaClimatePanel extends HTMLElement {
     return `
       <div class="summary">
         <div class="card stat"><div class="muted">Baseline</div><div class="big">${fmt(b.m3_per_degree_day, 3)}<small>m³/gd</small></div>
-          <div class="muted small">${b.frozen ? `❄ bevroren op ${fmt(b.frozen.m3_per_degree_day, 3)} · ` : ""}${b.days_used} dagen${b.first_day ? ` vanaf ${baselineFrom}` : ""}${b.reliable ? "" : " · nog onbetrouwbaar"}</div></div>
+          <div class="muted small">${b.days_used} dagen${b.first_day ? ` vanaf ${baselineFrom}` : ""}${b.reliable ? "" : " · nog onbetrouwbaar"}</div></div>
         ${costTile("Gaskosten vandaag", e.cost_today, e.gas_today, 1)}
         ${costTile("Gaskosten gisteren", e.cost_yesterday, e.gas_yesterday, 1)}
         <div class="card stat"><div class="muted">Gaskosten periode (${this._days} d)</div><div class="big">${rows.length ? euro(periodCost) : "–"}</div>
           <div class="muted small">${rows.length ? `${euro(periodVariable)} variabel + ${euro(fixed * costDays)} vast · ${fmt(periodGas, 1, "m³")}` : "laden…"}</div></div>
       </div>
-      <div class="summary">
-        <div class="card stat"><div class="muted">Bespaard vandaag</div><div class="mid">${fmt(e.saved_today, 2)}<small>m³</small></div>
-          <div class="muted small">${euro(e.saved_today === null || e.saved_today === undefined ? null : e.saved_today * e.gas_price)} variabel</div></div>
-        <div class="card stat"><div class="muted">Bespaard gisteren</div><div class="mid">${fmt(e.saved_yesterday, 2)}<small>m³</small></div>
-          <div class="muted small">${euro(e.saved_yesterday === null || e.saved_yesterday === undefined ? null : e.saved_yesterday * e.gas_price)} variabel</div></div>
-        <div class="card stat"><div class="muted">Bespaard periode</div><div class="mid">${rows.length ? fmt(periodSaved, 1) : "–"}<small>m³</small></div>
-          <div class="muted small">${rows.length ? euro(periodSaved * e.gas_price) : ""} variabel</div></div>
-        <div class="card stat"><div class="muted">Gasprijs</div><div class="mid">${euro(e.gas_price)}<small>/m³</small></div>
-          <div class="muted small">${esc(e.gas_price_source || "")}${fixed ? ` · vast ${euro(fixed)}/dag` : ""}</div></div>
-      </div>
       <div class="bar"><div class="segmented">${periods}</div><div class="spacer"></div>
         <button class="btn text" data-action="export">⬇ Exporteer CSV</button>
         ${this._admin ? '<button class="btn text" data-action="recalculate">Baseline herberekenen</button>' : ""}</div>
-      <div class="card">${this._renderFreeze()}</div>
+      ${this._renderMeasurement()}
       <div class="card">
         <h3>Graaddagen vs. gasverbruik per dag</h3>
         <div class="legend">
           <span><i style="background:${COLORS.gas}"></i>Werkelijk gas (m³)</span>
           <span><i class="line" style="background:${COLORS.expected}"></i>Verwacht gas (m³)</span>
           <span><i class="line" style="background:${COLORS.degreeDays}"></i>Graaddagen</span>
-          <span><i class="event-key"></i>Wijziging (nachtverlaging, baseline)</span>
+          <span><i class="line start-key"></i>Start meting</span>
+          <span><i class="event-key"></i>Instelling gewijzigd</span>
         </div>
         <div class="chart" id="chart-gas"></div>
         <p class="muted small">
-          <b>Baseline:</b> ${fmt(b.m3_per_degree_day, 3, "m³ per graaddag")} berekend over <b>${b.days_used} dagen</b>
+          <b>Referentie (baseline):</b> ${fmt(b.m3_per_degree_day, 3, "m³ per graaddag")} geleerd uit <b>${b.days_used} dagen</b>
           ${b.first_day ? `van ${dateLabel(b.first_day)} t/m ${dateLabel(b.last_day)}` : ""}.
           ${b.overlap_start ? `Beide sensoren hebben data vanaf <b>${dateLabel(b.overlap_start)}</b>; ` : ""}${b.days_stored ? `${b.days_stored} dagen permanent opgeslagen.` : ""}
           ${excluded ? `Overgeslagen: ${excluded}.` : ""}
@@ -576,13 +621,14 @@ class HaClimatePanel extends HTMLElement {
         </p>
       </div>
       <div class="card">
-        <div class="card-head"><h3>Cumulatieve gasbesparing (variabel)</h3>
+        <div class="card-head"><h3>Besparing sinds de start</h3>
           <div class="segmented small">
             <button class="seg ${this._chartUnit === "m3" ? "active" : ""}" data-action="unit" data-unit="m3">m³</button>
             <button class="seg ${this._chartUnit === "eur" ? "active" : ""}" data-action="unit" data-unit="eur">€</button>
           </div></div>
         <div class="chart" id="chart-savings"></div>
-        <p class="muted small">${b.savings_start ? `Cumulatief vanaf de startdatum ${dateLabel(b.savings_start)} (begint op 0). ` : ""}${b.frozen ? `Vergeleken met de bevroren baseline van ${fmt(b.frozen.m3_per_degree_day, 3)} m³/graaddag. ` : ""}Besparing = verwacht (baseline × graaddagen) − werkelijk, opgeteld over de gekozen periode en omgerekend met de variabele gasprijs (vaste leveringskosten tellen niet mee). Dagen met nachtverlaging zijn gemarkeerd.</p>
+        <p class="muted small">Opgeteld vanaf de start van de meting (${dateLabel(b.measurement_start)}). Besparing = verwacht (referentie × graaddagen) − werkelijk,
+          omgerekend met de variabele gasprijs; vaste leveringskosten tellen niet mee. Dagen met nachtverlaging zijn gearceerd.</p>
       </div>
       ${s.boiler ? this._renderBoiler() : ""}
       ${this._renderModelSection()}`;
@@ -797,6 +843,7 @@ class HaClimatePanel extends HTMLElement {
         width: gasEl.clientWidth || 700,
         labels,
         marks: rows.map((r) => (r.fireplace ? "🔥" : "")),
+        start: rows.findIndex((r) => r.date === this._state.baseline.measurement_start),
         series: [
           { name: "Werkelijk gas", type: "bar", axis: "left", color: COLORS.gas, values: rows.map((r) => r.gas), unit: "m³", digits: 2 },
           { name: "Verwacht gas", type: "line", axis: "left", color: COLORS.expected, values: rows.map((r) => r.expected), unit: "m³", digits: 2 },
@@ -808,22 +855,30 @@ class HaClimatePanel extends HTMLElement {
           { name: "Comfort (dag)", type: "tooltip", axis: "left", color: "#5e35b1", values: rows.map((r) => r.indoor_comfort), unit: "°C" },
           { name: "Stookgrens", type: "tooltip", axis: "left", color: "#9e9e9e", values: rows.map((r) => (this._state.baseline.indoor_correction ? r.heating_limit : null)), unit: "°C" },
         ],
-        events: rows.map((r) => r.events || []),
+        events: rows.map((r) => summarizeEvents(r.events)),
       });
       const savEl = root.getElementById("chart-savings");
       const eur = this._chartUnit === "eur";
-      savEl.innerHTML = chart({
+      // Only the days since the start of the measurement.
+      const startIso = this._state.baseline.measurement_start;
+      const measured = rows.filter((r) => !startIso || r.date >= startIso);
+      const complete = measured.filter((r) => !r.partial).length;
+      if (!measured.length || (complete === 0 && measured.length <= 1)) {
+        savEl.innerHTML = `<div class="placeholder"><b>De meting is ${complete === 0 && measured.length ? "vandaag" : ""} gestart op ${dateLabel(startIso)}.</b><br>
+          <span class="muted">Morgen staat hier de eerste volledige dag: hoeveel gas er is verbruikt tegenover wat zonder maatregelen verwacht werd.
+          ${measured.length ? `Vandaag tot nu: ${fmt(measured[0].gas, 2, "m³")} verbruikt, ${fmt(measured[0].expected, 2, "m³")} verwacht (voorlopig, de dag is nog niet om).` : ""}</span></div>`;
+      } else savEl.innerHTML = chart({
         width: savEl.clientWidth || 700,
-        labels,
-        shade: rows.map((r) => r.setback),
-        events: rows.map((r) => r.events || []),
+        labels: measured.map((r) => dayLabel(r.date) + (r.partial ? " (nu)" : "")),
+        shade: measured.map((r) => r.setback),
+        events: measured.map((r) => summarizeEvents(r.events)),
         series: [
           {
             name: eur ? "Cumulatief (€)" : "Cumulatief (m³)",
             type: "area",
             axis: "left",
             color: eur ? COLORS.savedEur : COLORS.saved,
-            values: rows.map((r) => (eur ? r.cumulative_saved_eur : r.cumulative_saved)),
+            values: measured.map((r) => (eur ? r.cumulative_saved_eur : r.cumulative_saved)),
             unit: eur ? "€" : "m³",
             digits: 2,
           },
@@ -833,7 +888,7 @@ class HaClimatePanel extends HTMLElement {
             axis: "left",
             color: eur ? COLORS.savedEur : COLORS.saved,
             opacity: 0.35,
-            values: rows.map((r) => (eur ? r.saved_eur : r.saved)),
+            values: measured.map((r) => (eur ? r.saved_eur : r.saved)),
             unit: eur ? "€" : "m³",
             digits: 2,
           },
@@ -894,6 +949,77 @@ class HaClimatePanel extends HTMLElement {
     }
   }
 
+  /* ----- Tips ----- */
+  _renderTips() {
+    if (this._adviceError) {
+      return `<div class="card empty"><h2>Tips niet beschikbaar</h2><p>${esc(this._adviceError)}</p>
+        <button class="btn" data-action="advice-refresh">Opnieuw proberen</button></div>`;
+    }
+    const a = this._advice;
+    if (!a) return `<div class="card empty"><div class="spinner"></div><p>Tips berekenen uit de laatste 10 dagen…</p></div>`;
+    const basis = a.basis;
+    const ICON = { measurement: "📏", result: "📊", night: "🌙", day: "🌡", room: "🏠", boiler: "🔥" };
+    const CONF = { goed: "#43a047", redelijk: "#ffa726", laag: "#9e9e9e" };
+    const tip = (t) => `
+      <div class="card tip-card cat-${esc(t.category)}">
+        <div class="tip-icon">${ICON[t.category] || "💡"}</div>
+        <div class="tip-body">
+          <div class="tip-head"><b>${esc(t.title)}</b></div>
+          <p>${esc(t.text)}</p>
+          ${t.details && t.details.length ? `<ul class="tip-details">${t.details.map((d) => `<li>${esc(d)}</li>`).join("")}</ul>` : ""}
+          ${t.action && this._admin ? `<div class="actions left"><button class="btn" data-action="apply-tip" data-tip="${esc(t.id)}">${esc(t.action.label || "Toepassen")}</button></div>` : ""}
+        </div>
+        ${t.saving_eur_month !== null && t.saving_eur_month !== undefined ? `<div class="tip-saving">
+          <div class="mid">${t.saving_eur_month > 0 ? "≈ " : ""}${euro(t.saving_eur_month)}</div>
+          <div class="muted small">per maand · ${fmt(t.saving_m3_month, 1, "m³")}</div>
+          <span class="chip" style="--chip:${CONF[t.confidence] || "#9e9e9e"}">zekerheid ${esc(t.confidence)}</span>
+        </div>` : ""}
+      </div>`;
+    const head = (t) => t.category === "measurement" || t.category === "result";
+    const top = a.tips.filter(head);
+    const money = a.tips.filter((t) => !head(t) && t.saving_eur_month !== null && t.saving_eur_month !== undefined);
+    const other = a.tips.filter((t) => !head(t) && (t.saving_eur_month === null || t.saving_eur_month === undefined));
+    const rooms = a.rooms
+      .map((r) => `<tr>
+        <td><b>${esc(r.name)}</b></td>
+        <td>${fmt(r.day_target, 1, "°C")}</td>
+        <td>${fmt(r.night_target, 1, "°C")}</td>
+        <td>${fmt(r.measured, 1, "°C")}</td>
+        <td>${r.share !== null && r.share !== undefined ? fmt(r.share * 100, 0, "%") : "–"}</td>
+        <td>${fmt(r.night_drop, 1, "°C")}${r.estimated_model ? ' <span class="muted small">(aanname)</span>' : ""}</td>
+      </tr>`)
+      .join("");
+    return `
+      ${top.map(tip).join("")}
+      <div class="bar">
+        <p class="muted small grow">Gebaseerd op de laatste ${basis.days} dagen: buiten gemiddeld ${fmt(basis.outdoor_mean, 1, "°C")},
+          ongeveer ${fmt(basis.heating_gas_per_day, 1, "m³")} gas per dag voor verwarming (${euro((basis.heating_gas_per_day ?? 0) * basis.gas_price)}).
+          Bedragen per maand gaan uit van weer zoals de afgelopen dagen; ‘Huidige instelling werkt’ toont wat de huidige nachtverlaging gemeten oplevert.
+          ${basis.calibration !== 1 ? `Bijgesteld met de meting: factor ${fmt(basis.calibration, 2)}.` : ""}</p>
+        <button class="btn text" data-action="advice-refresh">↻ Opnieuw berekenen</button>
+      </div>
+      <div class="card"><h3>Logboek: wat leverde elke instelling op?</h3>${this._renderPeriods(a.periods)}</div>
+      ${money.length ? `<h3 class="section">Wat het kan opleveren</h3>${money.map(tip).join("")}` : ""}
+      ${other.length ? `<h3 class="section">Opvallend</h3>${other.map(tip).join("")}` : ""}
+      <div class="card">
+        <h3>Per kamer – afgelopen ${basis.days} dagen</h3>
+        <div class="table-wrap"><table class="ranking">
+          <thead><tr><th>Kamer</th><th>Overdag ingesteld</th><th>'s Nachts ingesteld</th><th>Gemeten</th><th>Aandeel gas</th><th>Afkoeling per nacht</th></tr></thead>
+          <tbody>${rooms}</tbody></table></div>
+        <p class="muted small">Ingestelde en gemeten temperaturen komen uit de recorder (tijdgewogen gemiddelde). Het aandeel gas is geschat uit het aantal lussen
+          en het verschil tussen binnen en buiten. De afkoeling per nacht volgt uit het geleerde model van de kamer; zonder model wordt een gemiddelde
+          vloerverwarmingswoning aangenomen.</p>
+      </div>
+      <details class="card optional"><summary><h3>Hoe worden de tips berekend?</h3></summary>
+        <p class="muted small">Een kamer verliest warmte in verhouding tot het verschil tussen binnen en buiten. Alles wat een kamer een tijd koeler houdt
+          – overdag lager, of een nachtverlaging inclusief het weer opwarmen 's ochtends – bespaart dus het deel
+          <i>graad-uren koeler ÷ (24 uur × verschil binnen/buiten)</i> van het gas voor die kamer. Hoe snel een kamer 's nachts afkoelt en weer opwarmt,
+          leert HA Climate per kamer uit de metingen (tabblad Analyses → thermisch model). Zodra er ${3} of meer volledige dagen zijn gemeten sinds de
+          startdatum, worden alle schattingen bijgesteld (per instelling wordt onthouden wat het model voorspelde, zodat ook na een wijziging verder geleerd wordt) met de verhouding tussen gemeten en voorspelde besparing; na twee weken telt de meting volledig.
+          Zo wordt het advies steeds nauwkeuriger.</p>
+      </details>`;
+  }
+
   /* ----- Schedules ----- */
   _renderSchedules() {
     const s = this._state;
@@ -950,22 +1076,80 @@ class HaClimatePanel extends HTMLElement {
       vroegere start gebruikt (0,5 °C per uur).</p><div class="grid wide">${cards}</div>`;
   }
 
-  _renderFreeze(inSettings = false) {
+  /* ----- Savings measurement ----- */
+  _renderMeasurement() {
     const b = this._state.baseline;
-    const frozen = b.frozen;
+    const e = this._state.energy || {};
     const admin = this._admin;
-    const quick = inSettings
-      ? ""
-      : `<label class="field inline-field"><span>Startdatum besparing</span><input name="savings_start_quick" type="date" value="${esc(b.savings_start || "")}" ${admin ? "" : "disabled"}></label>`;
-    return `<div class="freeze ${frozen ? "is-frozen" : ""}">
-      <div><b>${frozen ? "❄ Baseline bevroren" : "Baseline volgt de historie"}</b><br>
-        <span class="muted small">${frozen
-          ? `${fmt(frozen.m3_per_degree_day, 3)} m³/graaddag sinds ${dateLabel(frozen.frozen_at)} (${frozen.days_used} dagen${frozen.first_day ? ` vanaf ${dateLabel(frozen.first_day)}` : ""}). De besparing wordt hiertegen gemeten.`
-          : "Bevries de baseline voordat je nachtverlaging aanzet, zodat de besparing steeds tegen hetzelfde referentieverbruik wordt gemeten."}
-          Besparing telt vanaf <b>${dateLabel(b.measurement_start)}</b>.</span></div>
-      ${quick}
-      ${admin ? `<button class="btn ${frozen ? "text" : ""}" type="button" data-action="freeze" data-freeze="${frozen ? 0 : 1}">${frozen ? "Ontdooien" : "Baseline bevriezen"}</button>` : ""}
+    const start = b.measurement_start;
+    const today = (this._state.now || "").slice(0, 10);
+    const days = start && today ? Math.max(0, daysBetween(start, today)) : 0;
+    const price = e.gas_price;
+    const status = days === 0
+      ? "Vandaag gestart. Morgen staat hier de eerste volledige dag."
+      : `${days} volledige dag${days === 1 ? "" : "en"} gemeten.`;
+    return `<div class="card measure">
+      <div class="measure-head">
+        <div>
+          <h3>Besparing meten sinds ${dateLabel(start)}</h3>
+          <div class="muted small">${status}
+            Vergeleken met hoe het huis vóór die datum stookte: ${fmt(b.m3_per_degree_day, 3)} m³ per graaddag
+            (${b.days_used} dagen${b.first_day ? `, ${dateLabel(b.first_day)} – ${dateLabel(b.last_day)}` : ""}${b.reliable ? "" : ", nog onbetrouwbaar"}).</div>
+        </div>
+        ${admin ? `<div class="measure-start">
+          <label class="field"><span>Startdatum</span><input name="savings_start_quick" type="date" value="${esc(b.savings_start || start || "")}" max="${esc(today)}"></label>
+          <button class="btn text" data-action="savings-start">Wijzigen</button></div>` : ""}
+      </div>
+      <div class="tiles">
+        <div class="tile"><div class="muted small">Totaal bespaard (${e.saved_total_days ?? 0} d)</div><div class="mid">${fmt(e.saved_total, 2)}<small>m³</small></div>
+          <div class="muted small">${e.saved_total === null || e.saved_total === undefined ? "nog geen volledige dag" : euro(e.saved_total * price)}</div></div>
+        <div class="tile"><div class="muted small">Gisteren</div><div class="mid">${days >= 1 ? fmt(e.saved_yesterday, 2) : "–"}<small>m³</small></div>
+          <div class="muted small">${days >= 1 ? `${fmt(e.gas_yesterday, 2)} van ${fmt(e.expected_yesterday, 2)} m³ verwacht` : "vóór de start"}</div></div>
+        <div class="tile"><div class="muted small">Vandaag tot nu (voorlopig)</div><div class="mid">${fmt(e.saved_today, 2)}<small>m³</small></div>
+          <div class="muted small">${fmt(e.gas_today, 2)} van ${fmt(e.expected_today, 2)} m³ verwacht</div></div>
+      </div>
+      ${this._renderFireplaceDays()}
+      <h3 class="sub">Wat leverde elke instelling op?</h3>
+      ${this._renderPeriods(this._state.periods)}
+      <p class="muted small">Een enkele dag zegt weinig (zon, wind, tapwater, bezoek); kijk na een week naar het totaal. Een andere startdatum leert de vergelijking opnieuw uit de dagen daarvóór.</p>
     </div>`;
+  }
+
+  /* Every change of the night setting starts a new period; its measured result is kept. */
+  _renderPeriods(periods) {
+    if (!periods || !periods.length) return '<p class="muted small">Nog geen instellingen bijgehouden.</p>';
+    const price = this._state.energy?.gas_price ?? 0;
+    const rows = [...periods]
+      .reverse()
+      .map((p) => {
+        const until = p.current ? "nu" : dateLabel(p.end);
+        const pct = p.fraction === null || p.fraction === undefined ? null : p.fraction * 100;
+        const color = pct === null ? "" : pct >= 2 ? "good" : pct <= -2 ? "bad" : "";
+        return `<tr class="${p.current ? "current" : ""}">
+          <td>${dateLabel(p.start)} – ${until}</td>
+          <td>${esc(p.text)}${p.current ? ' <span class="chip" style="--chip:var(--accent)">nu</span>' : ""}</td>
+          <td>${p.days}${p.fireplace_days ? `<br><small class="muted">+${p.fireplace_days} openhaard</small>` : ""}</td>
+          <td>${p.days ? `${fmt(p.actual, 1)} / ${fmt(p.expected, 1)} m³` : "–"}</td>
+          <td class="${color}"><b>${pct === null ? "–" : `${pct > 0 ? "−" : "+"}${fmt(Math.abs(pct), 0)} %`}</b></td>
+          <td>${p.per_day !== null && p.per_day !== undefined ? `${euro(p.per_day * 30 * price)}` : "–"}</td>
+        </tr>`;
+      })
+      .join("");
+    return `<div class="table-wrap"><table class="ranking periods">
+      <thead><tr><th>Periode</th><th>Instelling</th><th>Dagen</th><th>Verbruikt / verwacht</th><th>Verschil</th><th>€ per maand</th></tr></thead>
+      <tbody>${rows}</tbody></table></div>
+      <p class="muted small">Elke wijziging van de nachtverlaging (tijden, verlaging, aan/uit, per kamer) start een nieuwe periode; een wijziging na 12:00 telt vanaf de
+        volgende dag. Alleen volledige dagen tellen, dagen met de openhaard niet. − = minder gas dan verwacht (bespaard).</p>`;
+  }
+
+  _renderFireplaceDays() {
+    const fp = this._state.fireplace;
+    const days = Object.entries(fp.recent || {});
+    if (!fp.configured || !days.length) return "";
+    return `<div class="fp-days muted small">🔥 Openhaard gedetecteerd: ${days
+      .map(([d, m]) => `<span class="fp-day">${dateLabel(d)} ${m} min${this._admin ? ` <button class="btn text small" data-action="fireplace-clear" data-day="${d}">klopt niet</button>` : ""}</span>`)
+      .join("")}
+      <br>Dagen met ≥ 30 min openhaard tellen niet mee in de meting. Brandde hij niet (bijv. na het handmatig lager zetten)? Klik op <i>klopt niet</i>.</div>`;
   }
 
   /* ----- Settings ----- */
@@ -977,56 +1161,73 @@ class HaClimatePanel extends HTMLElement {
     const gas = this._entities((s) => s.entity_id.startsWith("sensor.") && s.attributes.device_class === "gas");
     const prices = this._entities((s) => /^(sensor|input_number|number)\./.test(s.entity_id) && !["temperature", "gas"].includes(s.attributes.device_class));
     const climates = this._entities((s) => s.entity_id.startsWith("climate."));
+    const perDay = st.gas_fixed_costs ? (st.gas_fixed_costs_unit === "day" ? st.gas_fixed_costs : st.gas_fixed_costs / 30.4375) : 0;
+    const fireplace = !!(st.fireplace_climate || st.fireplace_temp_sensor);
+    const advanced = st.degree_day_indoor_correction || Number(st.heating_limit) !== 18 || Number(st.baseline_days) !== 0;
     return `
-      <form class="card settings" id="settings-form">
-        <h3>Sensoren &amp; graaddagen</h3>
-        <div class="form-grid">
-          <label class="field"><span>Buitentemperatuur-sensor</span><select name="outdoor_sensor" ${dis}>${this._options(temps, st.outdoor_sensor)}</select></label>
-          <label class="field"><span>Gasverbruik-sensor (m³)</span><select name="gas_sensor" ${dis}>${this._options(gas, st.gas_sensor)}</select></label>
-          <label class="field"><span>Stookgrens (°C)</span><input name="heating_limit" type="number" step="0.5" min="10" max="25" value="${st.heating_limit}" ${dis}></label>
-          <label class="field"><span>Baseline-periode (dagen, 0 = alles)</span><input name="baseline_days" type="number" step="1" min="0" max="3650" value="${st.baseline_days}" ${dis}></label>
-        </div>
-        <h3>Gasprijs</h3>
-        <div class="form-grid">
-          <label class="field"><span>Vaste gasprijs (€/m³)</span><input name="gas_price" type="number" step="0.0001" min="0" max="10" value="${st.gas_price ?? ""}" placeholder="standaard ${fmt(this._state.defaults.gas_price, 2)}" ${dis}></label>
-          <label class="field"><span>Of: gasprijs-entiteit</span><select name="gas_price_entity" ${dis}>${this._options(prices, st.gas_price_entity, true)}</select></label>
-          <label class="field"><span>Vaste leveringskosten</span><input name="gas_fixed_costs" type="number" step="0.01" min="0" max="500" value="${st.gas_fixed_costs ?? 0}" placeholder="0,00" ${dis}></label>
-          <label class="field"><span>Per</span><select name="gas_fixed_costs_unit" ${dis}>
-            <option value="month" ${st.gas_fixed_costs_unit !== "day" ? "selected" : ""}>maand (€/maand)</option>
-            <option value="day" ${st.gas_fixed_costs_unit === "day" ? "selected" : ""}>dag (€/dag)</option></select></label>
-        </div>
-        <p class="muted small">Een entiteit gaat voor op de vaste prijs. Zonder prijs wordt ${euro(this._state.defaults.gas_price)} per m³ gebruikt.
-          Vaste leveringskosten (vastrecht, netbeheer) tellen mee in de totale gaskosten, niet in de besparing.
-          ${st.gas_fixed_costs ? `Dat is ${euro(st.gas_fixed_costs_unit === "day" ? st.gas_fixed_costs : st.gas_fixed_costs / 30.4375)} per dag
-          (${euro(st.gas_fixed_costs_unit === "day" ? st.gas_fixed_costs * 30.4375 : st.gas_fixed_costs)} per maand).` : ""}</p>
-        <h3>Besparingsmeting</h3>
-        <div class="form-grid">
-          <label class="field"><span>Startdatum besparing</span><input name="savings_start" type="date" value="${esc(st.savings_start || "")}" ${dis}></label>
-        </div>
-        <label class="check inline"><input type="checkbox" name="degree_day_indoor_correction" ${st.degree_day_indoor_correction ? "checked" : ""} ${dis}>
-          <span>Graaddagen corrigeren voor de comforttemperatuur (stookgrens + (comforttemperatuur − referentie))</span></label>
-        <div class="form-grid">
-          <label class="field"><span>Referentie-comforttemperatuur (°C)</span><input name="degree_day_reference_temp" type="number" step="0.1" min="15" max="25" value="${st.degree_day_reference_temp ?? 20}" ${dis}></label>
-        </div>
-        <p class="muted small">De comforttemperatuur is de gemiddelde dagtemperatuur van de kamers, <b>zonder nachtverlaging</b> – die blijft dus als besparing zichtbaar.
-          Vul als referentie de temperatuur in waarop je het huis in de baselineperiode verwarmde. Zet je de kamers later warmer, dan stijgt het verwachte verbruik mee
-          (en andersom). Dagen zonder bekende comforttemperatuur, zoals de dagen vóór installatie, tellen als de referentie; zo gebruiken baseline en metingen dezelfde regel.
-          Na het wijzigen wordt de baseline herberekend; een bevroren baseline blijft staan.</p>
-        ${this._renderFreeze(true)}
-        <h3>Nachtverlaging (algemeen)</h3>
-        <div class="form-grid">
-          <label class="field"><span>Start</span><input name="night_start" type="time" value="${hhmm(st.night_start)}" ${dis}></label>
-          <label class="field"><span>Herstel</span><input name="night_end" type="time" value="${hhmm(st.night_end)}" ${dis}></label>
-          <label class="field"><span>Verlaging (°C)</span><input name="night_offset" type="number" step="0.5" min="-10" max="0" value="${st.night_offset}" ${dis}></label>
-        </div>
-        <h3>Openhaard</h3>
-        <div class="form-grid">
-          <label class="field"><span>Thermostaat openhaard-ruimte</span><select name="fireplace_climate" ${dis}>${this._options(climates, st.fireplace_climate, true)}</select></label>
-          <label class="field"><span>Losse temperatuursensor</span><select name="fireplace_temp_sensor" ${dis}>${this._options(temps, st.fireplace_temp_sensor, true)}</select></label>
-          <label class="field"><span>Drempelwaarde (°C)</span><input name="fireplace_threshold" type="number" step="0.1" min="0.1" max="5" value="${st.fireplace_threshold}" ${dis}></label>
-        </div>
+      <form class="settings" id="settings-form">
+        <section class="card">
+          <h3>1 · Meters</h3>
+          <div class="form-grid">
+            <label class="field"><span>Buitentemperatuur</span><select name="outdoor_sensor" ${dis}>${this._options(temps, st.outdoor_sensor)}</select></label>
+            <label class="field"><span>Gasmeter (m³)</span><select name="gas_sensor" ${dis}>${this._options(gas, st.gas_sensor)}</select></label>
+          </div>
+        </section>
+        <section class="card">
+          <h3>2 · Gasprijs</h3>
+          <div class="form-grid">
+            <label class="field"><span>Prijs per m³ (€)</span><input name="gas_price" type="number" step="0.0001" min="0" max="10" value="${st.gas_price ?? ""}" placeholder="${fmt(this._state.defaults.gas_price, 2)}" ${dis}></label>
+            <label class="field"><span>Vaste kosten (€)</span><input name="gas_fixed_costs" type="number" step="0.01" min="0" max="500" value="${st.gas_fixed_costs ?? 0}" placeholder="0,00" ${dis}></label>
+            <label class="field"><span>per</span><select name="gas_fixed_costs_unit" ${dis}>
+              <option value="month" ${st.gas_fixed_costs_unit !== "day" ? "selected" : ""}>maand</option>
+              <option value="day" ${st.gas_fixed_costs_unit === "day" ? "selected" : ""}>dag</option></select></label>
+          </div>
+          <p class="muted small">Vaste kosten (vastrecht, netbeheer) tellen mee in de gaskosten, niet in de besparing${perDay ? ` – ${euro(perDay)} per dag` : ""}.</p>
+          <details class="optional" ${st.gas_price_entity ? "open" : ""}><summary>Dynamische prijs uit een entiteit</summary>
+            <div class="form-grid"><label class="field"><span>Gasprijs-entiteit (gaat voor op de vaste prijs)</span><select name="gas_price_entity" ${dis}>${this._options(prices, st.gas_price_entity, true)}</select></label></div>
+          </details>
+        </section>
+        <section class="card">
+          <h3>3 · Nachtverlaging</h3>
+          <div class="form-grid">
+            <label class="field"><span>Van</span><input name="night_start" type="time" value="${hhmm(st.night_start)}" ${dis}></label>
+            <label class="field"><span>Tot</span><input name="night_end" type="time" value="${hhmm(st.night_end)}" ${dis}></label>
+            <label class="field"><span>Verlaging (°C)</span><input name="night_offset" type="number" step="0.5" min="-10" max="0" value="${st.night_offset}" ${dis}></label>
+          </div>
+          <p class="muted small">Geldt voor alle kamers. Per kamer afwijken of optimum start aanzetten doe je op het tabblad Schema's.</p>
+        </section>
+        <section class="card">
+          <h3>4 · Besparing meten</h3>
+          <div class="form-grid">
+            <label class="field"><span>Meten vanaf</span><input name="savings_start" type="date" value="${esc(st.savings_start || "")}" ${dis}></label>
+          </div>
+          <p class="muted small">Kies de dag waarop je met besparen begon. Het verbruik vóór die dag is de vergelijking (referentie); vanaf die dag wordt de besparing geteld.</p>
+        </section>
+        <details class="card optional" ${fireplace ? "open" : ""}>
+          <summary><h3>Openhaard (optioneel)</h3></summary>
+          <div class="form-grid">
+            <label class="field"><span>Thermostaat in de openhaard-ruimte</span><select name="fireplace_climate" ${dis}>${this._options(climates, st.fireplace_climate, true)}</select></label>
+            <label class="field"><span>Of: losse temperatuursensor</span><select name="fireplace_temp_sensor" ${dis}>${this._options(temps, st.fireplace_temp_sensor, true)}</select></label>
+            <label class="field"><span>Drempel (°C boven doel)</span><input name="fireplace_threshold" type="number" step="0.1" min="0.1" max="5" value="${st.fireplace_threshold}" ${dis}></label>
+          </div>
+          <p class="muted small">Dagen waarop de openhaard brandde tellen niet mee in de referentie.</p>
+        </details>
         ${this._renderBoilerSettings(st, dis)}
-        ${this._admin ? '<div class="actions"><button class="btn" type="submit">Instellingen opslaan</button></div>' : '<p class="muted">Alleen beheerders kunnen instellingen wijzigen.</p>'}
+        <details class="card optional" ${advanced ? "open" : ""}>
+          <summary><h3>Geavanceerd: graaddagen</h3></summary>
+          <div class="form-grid">
+            <label class="field"><span>Stookgrens (°C)</span><input name="heating_limit" type="number" step="0.5" min="10" max="25" value="${st.heating_limit}" ${dis}></label>
+            <label class="field"><span>Referentie: max. dagen terug (0 = alles)</span><input name="baseline_days" type="number" step="1" min="0" max="3650" value="${st.baseline_days}" ${dis}></label>
+          </div>
+          <label class="check inline"><input type="checkbox" name="degree_day_indoor_correction" ${st.degree_day_indoor_correction ? "checked" : ""} ${dis}>
+            <span>Corrigeren voor de dagtemperatuur binnen</span></label>
+          <div class="form-grid">
+            <label class="field"><span>Dagtemperatuur in de referentieperiode (°C)</span><input name="degree_day_reference_temp" type="number" step="0.1" min="15" max="25" value="${st.degree_day_reference_temp ?? 20}" ${dis}></label>
+          </div>
+          <p class="muted small">Met de correctie stijgt het verwachte verbruik mee als je de kamers overdag warmer zet dan in de referentieperiode (en andersom).
+            Nachtverlaging telt hierin niet mee en blijft dus als besparing zichtbaar.</p>
+        </details>
+        ${this._admin ? '<div class="save-bar"><button class="btn" type="submit">Opslaan</button></div>' : '<p class="muted">Alleen beheerders kunnen instellingen wijzigen.</p>'}
       </form>`;
   }
 
@@ -1037,10 +1238,9 @@ class HaClimatePanel extends HTMLElement {
     const field = (f) => `<label class="field"><span>${f.label}</span>
       <select name="${f.key}" ${dis}>${this._options(f.domain === "binary_sensor" ? binaries : sensors, st[f.key], true)}</select>
       <small class="muted">${esc(f.hint)}</small></label>`;
-    return `<details class="optional" ${configured ? "open" : ""}>
+    return `<details class="card optional" ${configured ? "open" : ""}>
       <summary><h3>Ketel / OpenTherm (optioneel)</h3></summary>
-      <p class="muted small">Koppel de entiteiten van je ketel (bijv. OpenTherm Gateway, ems-esp of een andere ketelintegratie) voor branderstarts, pendeldetectie,
-        tapwater vs. verwarming en een grafiek van de aanvoertemperatuur op het tabblad Analyses. Zonder ketel-entiteiten verandert er niets.</p>
+      <p class="muted small">Voor branderstarts, pendelen, tapwater vs. verwarming en de aanvoertemperatuur op het tabblad Analyses.</p>
       <div class="form-grid">${BOILER_FIELDS.slice(0, 8).map(field).join("")}</div>
       <p class="muted small">Optioneel: tellers van de ketel zelf. Laat leeg om starts en branduren te berekenen vanuit de vlamstatus.</p>
       <div class="form-grid">${BOILER_FIELDS.slice(8).map(field).join("")}</div>
@@ -1059,6 +1259,10 @@ class HaClimatePanel extends HTMLElement {
         if (this._tab === "analytics") {
           this._history = null;
           await this._loadHistory();
+          this._render();
+        }
+        if (this._tab === "tips") {
+          await this._loadAdvice();
           this._render();
         }
       })
@@ -1175,18 +1379,52 @@ class HaClimatePanel extends HTMLElement {
         await this._call({ type: "ha_climate/airco", room_id: el.dataset.room, mode: el.dataset.mode }, labels[el.dataset.mode]);
         break;
       }
-      case "freeze": {
-        const freeze = el.dataset.freeze === "1";
+      case "savings-start": {
         const start = this.shadowRoot.querySelector('[name="savings_start_quick"]')?.value;
-        const msg = { type: "ha_climate/baseline/freeze", freeze };
-        if (start !== undefined) msg.savings_start = start || null;
-        await this._call(msg, freeze ? "Baseline bevroren" : "Baseline niet meer bevroren");
-        if (this._tab === "analytics") {
-          await this._loadHistory();
-          this._render();
+        if (!start) {
+          this._toast("Kies een startdatum", true);
+          break;
         }
+        await this._call({ type: "ha_climate/settings/save", settings: { savings_start: start } }, `Besparing gemeten vanaf ${dateLabel(start)}`);
+        await this._loadHistory();
+        this._render();
         break;
       }
+      case "edit-temp":
+        this._editTemp(el, el.dataset.kind, el.dataset.room);
+        break;
+      case "fireplace-clear":
+        if (confirm(`Openhaard-minuten van ${dateLabel(el.dataset.day)} wissen?`)) {
+          await this._call({ type: "ha_climate/fireplace/clear", day: el.dataset.day }, "Openhaard-dag gewist");
+          if (this._tab === "analytics") {
+            await this._loadHistory();
+            this._render();
+          }
+        }
+        break;
+      case "apply-tip": {
+        const tip = this._advice?.tips.find((t) => t.id === el.dataset.tip);
+        const act = tip?.action;
+        if (!act) break;
+        const what = act.master === false ? "nachtverlaging uit" : `${fmt(act.night_offset, 1, "°C")}, ${act.night_start}–${act.night_end}`;
+        if (!confirm(`Nachtverlaging terugzetten naar: ${what}?`)) break;
+        if (act.master !== false) {
+          await this._call({ type: "ha_climate/settings/save", settings: { night_start: act.night_start, night_end: act.night_end, night_offset: act.night_offset } });
+        }
+        if (act.master !== undefined && act.master !== this._state.master) {
+          await this._call({ type: "ha_climate/master/set", enabled: act.master });
+        }
+        this._toast("Instelling teruggezet; dit start een nieuwe meetperiode");
+        await this._loadAdvice(true);
+        this._render();
+        break;
+      }
+      case "advice-refresh":
+        this._advice = null;
+        this._render();
+        await this._loadAdvice(true);
+        this._render();
+        break;
       case "export":
         await this._exportCsv();
         break;
@@ -1212,6 +1450,51 @@ class HaClimatePanel extends HTMLElement {
     }
   }
 
+  /* Click on a setpoint: type a value (Enter / leaving the field saves, Esc cancels). */
+  _editTemp(button, kind, roomId) {
+    const room = this._state.rooms.find((r) => r.id === roomId);
+    if (!room || !this._admin) return;
+    const airco = kind === "airco";
+    const current = airco
+      ? this._pendingAirco[roomId] ?? room.aircos.find((a) => a.available)?.target_temperature
+      : this._pendingTemp[roomId] ?? room.target_temperature;
+    const [min, max] = airco ? [10, 32] : [5, 30];
+    const input = document.createElement("input");
+    Object.assign(input, { type: "number", step: "0.5", min, max, value: current ?? "", className: "sp-input" });
+    input.setAttribute("inputmode", "decimal");
+    input.setAttribute("aria-label", "Doeltemperatuur");
+    button.replaceWith(input);
+    input.focus();
+    input.select();
+    this._editing = true;
+    let done = false;
+    const finish = (save) => {
+      if (done) return;
+      done = true;
+      this._editing = false;
+      const value = numOrNull(input.value);
+      if (!save || value === null || value === current) {
+        this._render();
+        return;
+      }
+      const next = Math.min(max, Math.max(min, Math.round(value * 10) / 10));
+      if (airco) {
+        this._pendingAirco[roomId] = next;
+        this._render();
+        this._sendAircoTemp(roomId, next, 0);
+      } else {
+        this._pendingTemp[roomId] = next;
+        this._render();
+        this._sendRoomTemp(roomId, next, 0);
+      }
+    };
+    input.addEventListener("keydown", (ev) => {
+      if (ev.key === "Enter") finish(true);
+      else if (ev.key === "Escape") finish(false);
+    });
+    input.addEventListener("blur", () => finish(true));
+  }
+
   /* Optimistic setpoint changes: update the number immediately, send after a short pause. */
   _stepRoomTemp(roomId, delta) {
     const room = this._state.rooms.find((r) => r.id === roomId);
@@ -1219,6 +1502,11 @@ class HaClimatePanel extends HTMLElement {
     const base = this._pendingTemp[roomId] ?? room.target_temperature ?? room.comfort_temperature ?? 20;
     const next = Math.min(30, Math.max(5, Math.round((base + delta) * 2) / 2));
     this._pendingTemp[roomId] = next;
+    this._sendRoomTemp(roomId, next);
+  }
+
+  _sendRoomTemp(roomId, next, delay = 700) {
+    const room = this._state.rooms.find((r) => r.id === roomId);
     const box = this.shadowRoot.querySelector(`[data-room-setpoint="${roomId}"]`);
     if (box) {
       box.querySelector(".sp-value").textContent = fmt(next, 1);
@@ -1235,7 +1523,7 @@ class HaClimatePanel extends HTMLElement {
       }
       delete this._pendingTemp[roomId];
       await this._refresh();
-    }, 700);
+    }, delay);
   }
 
   _stepAircoTemp(roomId, delta) {
@@ -1246,6 +1534,11 @@ class HaClimatePanel extends HTMLElement {
     const next = Math.min(32, Math.max(10, Math.round((base + delta) * 2) / 2));
     this._pendingAirco[roomId] = next;
     this._render();
+    this._sendAircoTemp(roomId, next);
+  }
+
+  _sendAircoTemp(roomId, next, delay = 700) {
+    const room = this._state.rooms.find((r) => r.id === roomId);
     clearTimeout(this._tempTimers[`a-${roomId}`]);
     this._tempTimers[`a-${roomId}`] = setTimeout(async () => {
       try {
@@ -1256,7 +1549,7 @@ class HaClimatePanel extends HTMLElement {
       }
       delete this._pendingAirco[roomId];
       await this._refresh();
-    }, 700);
+    }, delay);
   }
 
   async _exportCsv() {
@@ -1299,7 +1592,7 @@ class HaClimatePanel extends HTMLElement {
         num(r.degree_days, 2), num(r.gas, 3), num(r.expected, 3), num(r.saved, 3), num(r.saved_eur, 2),
         num(r.cost_variable, 2), num(r.cost_fixed, 2), num(r.cost, 2), r.fireplace_minutes ?? 0,
         r.setback ? "ja" : "nee", r.partial ? "ja" : "nee",
-        (r.events || []).map((e) => `${timeOf(e.time)} ${e.text}`).join(" | "),
+        summarizeEvents(r.events).map((e) => `${timeOf(e.time)} ${e.text}`).join(" | "),
         ...extra,
       ].map(cell).join(","));
     }
@@ -1408,9 +1701,9 @@ function niceMax(value) {
   return nice * exp;
 }
 
-function chart({ width, labels, series, marks = [], shade = [], events = [], shadeLabel = "nachtverlaging", labelWidth = 64 }) {
+function chart({ width, labels, series, marks = [], shade = [], events = [], shadeLabel = "nachtverlaging", labelWidth = 64, start = -1 }) {
   const height = 260;
-  const pad = { top: events.some((e) => e && e.length) ? 22 : 16, right: series.some((s) => s.axis === "right") ? 44 : 14, bottom: 34, left: 48 };
+  const pad = { top: events.some((e) => e && e.length) || start >= 0 ? 22 : 16, right: series.some((s) => s.axis === "right") ? 44 : 14, bottom: 34, left: 48 };
   const w = Math.max(280, width);
   const innerW = w - pad.left - pad.right;
   const innerH = height - pad.top - pad.bottom;
@@ -1471,12 +1764,24 @@ function chart({ width, labels, series, marks = [], shade = [], events = [], sha
     }
     if (marks[i]) svg += `<text x="${x(i)}" y="${pad.top + 10}" text-anchor="middle" font-size="10">${marks[i]}</text>`;
   });
-  // change markers (night setback on/off, settings, baseline frozen)
+  // start of the savings measurement: everything left of it is the reference
+  if (start > 0) {
+    const sx = pad.left + step * start;
+    svg += `<rect x="${pad.left}" y="${pad.top}" width="${sx - pad.left}" height="${innerH}" class="reference"/>`;
+    svg += `<line x1="${sx}" x2="${sx}" y1="${pad.top - 6}" y2="${pad.top + innerH}" class="start-line"/>`;
+    if (sx > w - pad.right - 70) {
+      svg += `<text x="${sx - 4}" y="${pad.top - 8}" class="start-label" text-anchor="end">referentie ◂ ▸ meting</text>`;
+    } else {
+      svg += `<text x="${sx - 4}" y="${pad.top - 8}" class="start-label" text-anchor="end">referentie</text>`;
+      svg += `<text x="${sx + 4}" y="${pad.top - 8}" class="start-label">meting ▸</text>`;
+    }
+  }
+  // change markers (night setback on/off, changed settings): one small flag per day
   events.forEach((list, i) => {
     if (!list || !list.length) return;
     const ex = x(i);
-    svg += `<line x1="${ex}" x2="${ex}" y1="${pad.top}" y2="${pad.top + innerH}" class="event-line"/>`;
-    svg += `<g class="event-badge"><circle cx="${ex}" cy="${pad.top - 2}" r="7"/><text x="${ex}" y="${pad.top + 1.5}" text-anchor="middle">${list.length > 1 ? list.length : "!"}</text></g>`;
+    svg += `<line x1="${ex}" x2="${ex}" y1="${pad.top + 6}" y2="${pad.top + innerH}" class="event-line"/>`;
+    svg += `<path class="event-flag" d="M${ex},${pad.top + innerH} V${pad.top + innerH - 10} h6 l-2,3 l2,3 h-6"/>`;
   });
   // series
   const bars = series.filter((s) => s.type === "bar");
@@ -1639,7 +1944,7 @@ const STYLE = `
     background: color-mix(in srgb, var(--chip) 18%, transparent); color: var(--chip); font-weight: 500;
   }
   .chip::before { content: ""; width: 8px; height: 8px; border-radius: 50%; background: var(--chip); }
-  .temps { display: grid; grid-template-columns: 1.3fr 1fr 1fr; gap: 8px; margin-bottom: 12px; align-items: end; }
+  .temps { display: grid; grid-template-columns: 1fr 1.4fr 0.8fr; gap: 8px; margin-bottom: 12px; align-items: end; }
   .temps .muted { font-size: 12px; }
   .row { display: flex; justify-content: space-between; gap: 8px; padding: 6px 0; border-top: 1px solid var(--border); }
   details { border-top: 1px solid var(--border); padding-top: 6px; font-size: 13px; }
@@ -1703,16 +2008,55 @@ const STYLE = `
   .airco-line { display: flex; justify-content: space-between; gap: 8px; padding: 2px 0; }
   .airco-modes { margin-top: 6px; }
   .checklist.short { max-height: 170px; }
-  .freeze { display: flex; gap: 16px; align-items: center; flex-wrap: wrap; justify-content: space-between; }
-  .freeze > div:first-child { flex: 1; min-width: 240px; line-height: 1.5; }
-  .freeze.is-frozen b { color: #29b6f6; }
-  .inline-field { min-width: 170px; }
-  .settings .freeze { margin-top: 12px; padding: 12px; border: 1px solid var(--border); border-radius: 8px; }
-  .chart .event-line { stroke: #ff7043; stroke-width: 1.5; stroke-dasharray: 3 3; }
-  .chart .event-badge circle { fill: #ff7043; }
-  .chart .event-badge text { fill: #fff; font-size: 9px; font-weight: 700; }
-  .legend .event-key { width: 10px; height: 10px; border-radius: 50%; background: #ff7043; }
-  .tip-event { margin-top: 4px; padding-top: 4px; border-top: 1px solid var(--border); color: #ff7043; }
+  /* thermostat style setpoint: − value + ; click the value to type */
+  .thermo { display: inline-flex; align-items: center; gap: 6px; }
+  .thermo.small .step-btn { width: 26px; height: 26px; font-size: 16px; }
+  .sp-btn { background: none; border: 0; border-bottom: 1px dashed transparent; color: inherit; font: inherit; font-size: 22px; font-weight: 300;
+    padding: 0 2px; cursor: text; line-height: 1.2; }
+  .sp-btn:hover:not(:disabled) { border-bottom-color: var(--accent); }
+  .sp-btn:disabled { cursor: default; }
+  .sp-btn small { font-size: 14px; margin-left: 2px; color: var(--muted); }
+  .thermo.small .sp-btn { font-size: 15px; }
+  .sp-input::-webkit-inner-spin-button, .sp-input::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
+  .sp-input { -moz-appearance: textfield; width: 84px; font-size: 20px; padding: 2px 6px; text-align: center; border-radius: 6px; border: 1px solid var(--accent);
+    background: var(--card); color: var(--primary-text-color); font-family: inherit; }
+  /* savings measurement */
+  .measure-head { display: flex; gap: 16px; justify-content: space-between; align-items: flex-start; flex-wrap: wrap; margin-bottom: 8px; }
+  .measure-head > div:first-child { flex: 1; min-width: 240px; line-height: 1.5; }
+  .measure-head h3 { margin-bottom: 4px; }
+  .measure-start { display: flex; align-items: flex-end; gap: 4px; }
+  .measure-start .field { min-width: 160px; }
+  .placeholder { padding: 32px 16px; text-align: center; line-height: 1.6; border: 1px dashed var(--border); border-radius: 8px; }
+  /* chart markers */
+  .chart .reference { fill: var(--primary-text-color); opacity: .035; }
+  .chart .start-line { stroke: var(--accent); stroke-width: 2; }
+  .chart .start-label { fill: var(--accent); font-size: 10px; font-weight: 500; }
+  .legend .start-key { background: var(--accent); }
+  .chart .event-line { stroke: var(--muted); stroke-width: 1; stroke-dasharray: 2 3; opacity: .6; }
+  .chart .event-flag { fill: var(--muted); }
+  .legend .event-key { width: 8px; height: 10px; background: var(--muted); clip-path: polygon(0 0, 100% 0, 70% 50%, 100% 100%, 0 100%); }
+  .tip-event { margin-top: 4px; padding-top: 4px; border-top: 1px solid var(--border); color: var(--muted); }
+  /* settings */
+  .settings > .card h3 { margin-top: 0; }
+  details.card.optional { margin-top: 0; padding-top: 4px; }
+  .save-bar { position: sticky; bottom: 0; display: flex; justify-content: flex-end; padding: 12px 0;
+    background: linear-gradient(transparent, var(--primary-background-color, #fafafa) 40%); }
+  table.periods td.good b { color: #43a047; }
+  table.periods td.bad b { color: #e53935; }
+  table.periods tr.current td { background: color-mix(in srgb, var(--accent) 7%, transparent); }
+  .fp-days { margin: 8px 0; line-height: 1.8; }
+  .fp-day { margin-right: 12px; white-space: nowrap; }
+  .actions.left { justify-content: flex-start; }
+  /* tips */
+  .section { margin: 8px 4px 12px; font-weight: 500; font-size: 16px; }
+  .grow { flex: 1; min-width: 240px; margin: 0; }
+  .tip-card { display: flex; gap: 14px; align-items: flex-start; }
+  .tip-card.cat-measurement { border-left: 4px solid var(--accent); }
+  .tip-icon { font-size: 22px; line-height: 1; padding-top: 2px; }
+  .tip-body { flex: 1; min-width: 0; }
+  .tip-body p { margin: 6px 0 0; line-height: 1.5; color: var(--muted); font-size: 14px; }
+  .tip-details { margin: 6px 0 0; padding-left: 18px; color: var(--muted); font-size: 13px; }
+  .tip-saving { text-align: right; min-width: 130px; display: flex; flex-direction: column; align-items: flex-end; gap: 4px; }
   table.ranking td.rank { font-size: 20px; font-weight: 300; width: 32px; }
   .conf-bar.wide { width: 110px; }
   h3.sub { margin-top: 20px; font-size: 14px; color: var(--muted); }
@@ -1785,6 +2129,8 @@ const STYLE = `
     .tab { flex: 1; justify-content: center; }
     .big { font-size: 26px; }
     .info { grid-template-columns: 1fr 1fr; }
+    .tip-card { flex-wrap: wrap; }
+    .tip-saving { min-width: 0; width: 100%; flex-direction: row; justify-content: flex-end; align-items: baseline; gap: 8px; }
   }
 `;
 

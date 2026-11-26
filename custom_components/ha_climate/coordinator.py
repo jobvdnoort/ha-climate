@@ -66,7 +66,6 @@ from .calculations import (
     corrected_heating_limit,
     daily_fixed_costs,
     describe_night,
-    format_number,
     rank_rooms,
     day_fraction,
     degree_days,
@@ -144,11 +143,24 @@ from .const import (
     HISTORY_STORAGE_KEY,
     MAX_EVENTS,
     RANKING_DAYS,
+    ADVICE_CACHE,
+    ADVICE_DAYS,
     STORAGE_KEY,
     STORAGE_VERSION,
     UPDATE_INTERVAL,
 )
-from .recorder_history import async_backfill_observations, async_boiler_trace
+from .advice import (
+    HouseInput,
+    RoomInput,
+    build_advice,
+    summarize_setpoints,
+    window_hours,
+)
+from .recorder_history import (
+    async_backfill_observations,
+    async_boiler_trace,
+    async_climate_samples,
+)
 from .statistics import async_daily_history, async_first_overlap, async_period_value
 from .thermal import (
     PreheatPlan,
@@ -161,6 +173,9 @@ from .thermal import (
 _LOGGER = logging.getLogger(__name__)
 
 type HaClimateConfigEntry = ConfigEntry[HaClimateCoordinator]
+
+
+MONTHS = ("jan", "feb", "mrt", "apr", "mei", "jun", "jul", "aug", "sep", "okt", "nov", "dec")
 
 
 def _float_or_none(value: Any) -> float | None:
@@ -259,6 +274,7 @@ class HaClimateCoordinator(DataUpdateCoordinator[EnergyData]):
         self.baseline_updated: datetime | None = None
         self.models: dict[str, RoomThermalModel] = {}
         self.plans: dict[str, dict[str, Any]] = {}
+        self._advice: tuple[datetime, dict[str, Any]] | None = None
         self.fireplace = FireplaceDetector(
             threshold=float(
                 self.config.get(CONF_FIREPLACE_THRESHOLD, DEFAULT_FIREPLACE_THRESHOLD)
@@ -372,10 +388,15 @@ class HaClimateCoordinator(DataUpdateCoordinator[EnergyData]):
         history.setdefault("indoor", {})
         history.setdefault("events", [])  # [{"ts", "type", "room", "text"}]
         history.setdefault("boiler", {})  # {"days": {day: {...}}}
+        # Setting periods: [{"start", "key", "text", "settings", "predicted"}]
+        history.setdefault("periods", [])
         self.boiler = BoilerTracker.from_dict(
             history["boiler"], track_flame=bool(self.config.get(CONF_BOILER_FLAME))
         )
-        stored.setdefault("frozen_baseline", None)
+        # Older versions could "freeze" the baseline. The baseline is now
+        # always learned from the days before the savings start, which keeps
+        # it fixed by itself.
+        stored.pop("frozen_baseline", None)
         stored.setdefault("night_signature", None)
         # Migrate models from the old single storage file. The history is
         # written right away, before the old copy can disappear from storage.
@@ -390,6 +411,7 @@ class HaClimateCoordinator(DataUpdateCoordinator[EnergyData]):
                 history["models"].get(room[CONF_ROOM_ID])
             )
         self._log_night_setting_changes()
+        self._track_period()
 
     # ------------------------------------------------------------------
     # Event log (kept permanently in the history store)
@@ -462,6 +484,118 @@ class HaClimateCoordinator(DataUpdateCoordinator[EnergyData]):
             self.log_event(
                 "settings", f"Nachtverlaging {names[room_id]} {verb}: {text}", room_id
             )
+
+    # ------------------------------------------------------------------
+    # Setting periods: what did each night setting achieve?
+    # ------------------------------------------------------------------
+    def _setting_key(self) -> dict[str, Any]:
+        rooms = {
+            room[CONF_ROOM_ID]: (
+                self._night_description(room) if self.room_enabled(room[CONF_ROOM_ID]) else "uit"
+            )
+            for room in self.rooms
+        }
+        return {"master": self.master_enabled, "global": self._night_description(), "rooms": rooms}
+
+    def _setting_text(self, key: dict[str, Any]) -> str:
+        if not key["master"]:
+            return "Nachtverlaging uit"
+        names = {room[CONF_ROOM_ID]: room[CONF_ROOM_NAME] for room in self.rooms}
+        text = f"Nachtverlaging {key['global']}"
+        other = [
+            f"{names.get(room_id, room_id)}: {desc}"
+            for room_id, desc in key["rooms"].items()
+            if desc != key["global"]
+        ]
+        return f"{text} ({'; '.join(other)})" if other else text
+
+    def _track_period(self, now: datetime | None = None) -> None:
+        """Start a new setting period when the night settings changed.
+
+        A change in the afternoon or evening mainly affects the next day (the
+        night and the morning reheat), so it counts from the next day.
+        """
+        now = dt_util.as_local(now or dt_util.now())
+        key = self._setting_key()
+        cfg = self.config
+        entry = {
+            "key": key,
+            "text": self._setting_text(key),
+            "settings": {
+                "master": key["master"],
+                "night_start": str(cfg.get(CONF_NIGHT_START) or DEFAULT_NIGHT_START)[:5],
+                "night_end": str(cfg.get(CONF_NIGHT_END) or DEFAULT_NIGHT_END)[:5],
+                "night_offset": float(cfg.get(CONF_NIGHT_OFFSET, DEFAULT_NIGHT_OFFSET)),
+            },
+        }
+        periods: list[dict[str, Any]] = self._history["periods"]
+        if periods and periods[-1]["key"] == key:
+            return
+        effective = now.date() if now.hour < 12 else now.date() + timedelta(days=1)
+        if not periods:
+            effective = min(effective, self._measurement_start())
+        elif len(periods) > 1 and periods[-1]["start"] >= effective.isoformat():
+            # Changed again before the previous change took effect.
+            periods.pop()
+            if periods and periods[-1]["key"] == key:
+                self._async_save_history()
+                return
+        periods.append({"start": effective.isoformat(), **entry})
+        self._async_save_history()
+
+    def setting_periods(self) -> list[dict[str, Any]]:
+        """Measured result of every setting period since the savings start."""
+        periods = self._history.get("periods", [])
+        if not periods:
+            return []
+        today = dt_util.now().date()
+        start = self._measurement_start()
+        fireplace_days, _ = self._excluded_days()
+        rows = [
+            r
+            for r in self._day_rows(self._stored_records(start, today), include_today=False)
+            if r["gas"] is not None and r["expected"] is not None
+        ]
+        result = []
+        for index, period in enumerate(periods):
+            begin = date.fromisoformat(period["start"])
+            if index == 0:
+                # Days before the first tracked change had that same setting.
+                begin = min(begin, start)
+            end = (
+                date.fromisoformat(periods[index + 1]["start"])
+                if index + 1 < len(periods)
+                else None
+            )
+            if end is not None and end <= start:
+                continue  # entirely before the measurement
+            in_period = [
+                r
+                for r in rows
+                if begin <= date.fromisoformat(r["date"])
+                and (end is None or date.fromisoformat(r["date"]) < end)
+            ]
+            used = [r for r in in_period if date.fromisoformat(r["date"]) not in fireplace_days]
+            expected = sum(r["expected"] for r in used)
+            actual = sum(r["gas"] for r in used)
+            result.append(
+                {
+                    "start": max(begin, start).isoformat(),
+                    "end": (end - timedelta(days=1)).isoformat() if end else None,
+                    "current": end is None,
+                    "text": period["text"],
+                    "settings": period.get("settings"),
+                    "predicted": period.get("predicted"),
+                    "days": len(used),
+                    "fireplace_days": len(in_period) - len(used),
+                    "expected": expected,
+                    "actual": actual,
+                    "saved": expected - actual,
+                    "fraction": (expected - actual) / expected if expected > 0 else None,
+                    "per_day": (expected - actual) / len(used) if used else None,
+                }
+            )
+        return result
 
     @callback
     def _async_save(self) -> None:
@@ -597,6 +731,7 @@ class HaClimateCoordinator(DataUpdateCoordinator[EnergyData]):
             )
         self._stored["master"] = enabled
         self._async_save()
+        self._track_period()
         await self._async_evaluate_setback(dt_util.now())
         self.async_update_listeners()
 
@@ -611,6 +746,7 @@ class HaClimateCoordinator(DataUpdateCoordinator[EnergyData]):
             )
         self._stored["room_enabled"][room_id] = enabled
         self._async_save()
+        self._track_period()
         await self._async_evaluate_setback(dt_util.now())
         self.async_update_listeners()
 
@@ -1208,6 +1344,24 @@ class HaClimateCoordinator(DataUpdateCoordinator[EnergyData]):
         """Return the number of minutes the fireplace burned today."""
         return int(self._stored["fireplace_minutes"].get(dt_util.now().date().isoformat(), 0))
 
+    def fireplace_recent(self, days: int = 7) -> dict[str, int]:
+        """Fireplace minutes of the last days (only days with minutes)."""
+        cutoff = (dt_util.now().date() - timedelta(days=days)).isoformat()
+        return {
+            day: int(minutes)
+            for day, minutes in sorted(self._stored["fireplace_minutes"].items())
+            if day > cutoff and minutes
+        }
+
+    def clear_fireplace_day(self, day: date) -> None:
+        """Forget a wrongly detected fireplace day (e.g. after a lower setpoint)."""
+        self._stored["fireplace_minutes"].pop(day.isoformat(), None)
+        if day == dt_util.now().date():
+            self.fireplace.reset()
+        self._advice = None
+        self._async_save()
+        self.async_update_listeners()
+
     # ------------------------------------------------------------------
     # Baseline & history
     # ------------------------------------------------------------------
@@ -1300,10 +1454,13 @@ class HaClimateCoordinator(DataUpdateCoordinator[EnergyData]):
         start = self.overlap_start or (
             min((date.fromisoformat(d) for d in self._history["days"]), default=today)
         )
+        # Only days before the savings start count: the baseline describes the
+        # house *before* the measures, so it stays fixed once measuring starts.
+        end = self.baseline_end
         window = int(cfg.get(CONF_BASELINE_DAYS) or DEFAULT_BASELINE_DAYS)
         if window > 0:
-            start = max(start, today - timedelta(days=window))
-        records = self._stored_records(start, today)
+            start = max(start, end - timedelta(days=window))
+        records = self._stored_records(start, end)
 
         fireplace_days, setback_days = self._excluded_days()
         result = calculate_baseline(
@@ -1337,17 +1494,17 @@ class HaClimateCoordinator(DataUpdateCoordinator[EnergyData]):
         self.async_update_listeners()
         return self.baseline
 
-    # ---- frozen baseline & savings period ---------------------------
+    # ---- baseline & savings period -----------------------------------
     @property
-    def frozen_baseline(self) -> dict[str, Any] | None:
-        """The frozen baseline (value and context) or None."""
-        return self._stored.get("frozen_baseline")
+    def baseline_end(self) -> date:
+        """First day that is *not* part of the baseline (the savings start)."""
+        today = dt_util.now().date()
+        start = self.savings_start
+        return min(start, today) if start is not None else today
 
     @property
     def effective_baseline(self) -> float | None:
-        """Baseline used for the expected gas usage (frozen value wins)."""
-        if (frozen := self.frozen_baseline) is not None:
-            return frozen["m3_per_degree_day"]
+        """Baseline used for the expected gas usage."""
         return self.baseline.m3_per_degree_day if self.baseline else None
 
     @property
@@ -1360,27 +1517,6 @@ class HaClimateCoordinator(DataUpdateCoordinator[EnergyData]):
             return date.fromisoformat(str(value)[:10])
         except ValueError:
             return None
-
-    def freeze_baseline(self, freeze: bool) -> None:
-        """Freeze the current baseline (or unfreeze)."""
-        if freeze:
-            if self.baseline is None or not self.baseline.is_valid:
-                raise HomeAssistantError("Er is nog geen baseline om te bevriezen")
-            self._stored["frozen_baseline"] = {
-                **_baseline_to_dict(self.baseline),
-                "frozen_at": dt_util.now().isoformat(),
-            }
-            self.log_event(
-                "baseline",
-                "Baseline bevroren op "
-                f"{format_number(self.baseline.m3_per_degree_day, 3)} m³/graaddag"
-                f" ({self.baseline.days_used} dagen)",
-            )
-        elif self._stored.get("frozen_baseline") is not None:
-            self._stored["frozen_baseline"] = None
-            self.log_event("baseline", "Baseline niet meer bevroren")
-        self._stored["savings"] = {}  # recomputed against the new baseline
-        self._async_save()
 
     def _measurement_start(self) -> date:
         """Savings are counted from the configured start (or installation)."""
@@ -1439,8 +1575,8 @@ class HaClimateCoordinator(DataUpdateCoordinator[EnergyData]):
             "window_start": stored.get("window_start"),
             "days_available": stored.get("days_available"),
             "days_stored": len(self._history["days"]),
-            "frozen": self.frozen_baseline,
             "effective": self.effective_baseline,
+            "baseline_end": self.baseline_end.isoformat(),
             "savings_start": self.savings_start.isoformat() if self.savings_start else None,
             "measurement_start": self._measurement_start().isoformat(),
             "indoor_correction": self.indoor_correction,
@@ -1534,14 +1670,14 @@ class HaClimateCoordinator(DataUpdateCoordinator[EnergyData]):
         events = self.events_by_day()
         price = self.data.gas_price if self.data else self._gas_price()[0]
         fixed = self.data.fixed_costs if self.data else self._fixed_costs()
-        start = self.savings_start
+        start = self._measurement_start()
         rows: list[dict[str, Any]] = []
         cumulative = 0.0
         boiler = self.boiler_configured
 
         def row(day: date, mean, dd, gas, expected, saved, **extra) -> dict[str, Any]:
             nonlocal cumulative
-            counting = start is None or day >= start
+            counting = day >= start
             if counting:
                 cumulative += saved or 0.0
             indoor, target = self.indoor_day(day)
@@ -1644,6 +1780,140 @@ class HaClimateCoordinator(DataUpdateCoordinator[EnergyData]):
             }
             for r in rank_rooms(values)
         ]
+
+    # ---- saving advice --------------------------------------------------
+    async def async_advice(self, force: bool = False) -> dict[str, Any]:
+        """Tips with an estimated saving, based on the last days and the models."""
+        now = dt_util.now()
+        if (
+            not force
+            and self._advice is not None
+            and now - self._advice[0] < ADVICE_CACHE
+        ):
+            return self._advice[1]
+        today = now.date()
+        records = [
+            r
+            for r in self._stored_records(today - timedelta(days=ADVICE_DAYS), today)
+            if r.mean_temperature is not None
+        ]
+        outdoor = (
+            sum(r.mean_temperature for r in records) / len(records) if records else None
+        )
+        if outdoor is None:
+            outdoor = self.outdoor_temperature()
+        heating_gas = None
+        if records and self.effective_baseline is not None:
+            dd = [
+                degree_days(r.mean_temperature, self.heating_limit_for(r.day))
+                for r in records
+            ]
+            heating_gas = self.effective_baseline * sum(dd) / len(dd)
+
+        # Measured since the savings start (complete days, without fireplace).
+        fireplace_days, _ = self._excluded_days()
+        measured = [
+            row
+            for row in self._day_rows(
+                self._stored_records(self._measurement_start(), today), include_today=False
+            )
+            if row["gas"] is not None
+            and row["expected"] is not None
+            and date.fromisoformat(row["date"]) not in fireplace_days
+        ]
+
+        # Setpoints of the last days from the recorder.
+        climates = [e for room in self.rooms for e in room.get(CONF_ROOM_CLIMATES, [])]
+        try:
+            samples = await async_climate_samples(self.hass, climates, ADVICE_DAYS)
+        except Exception:  # noqa: BLE001
+            _LOGGER.debug("Reading climate history for the advice failed", exc_info=True)
+            samples = {}
+        end = dt_util.utcnow()
+        start = end - timedelta(days=ADVICE_DAYS)
+        ranking = {r["room_id"]: r["label"] for r in self.room_ranking()}
+        rooms = []
+        for room in self.rooms:
+            room_id = room[CONF_ROOM_ID]
+            schedule = self.schedule(room)
+            series = [samples[e] for e in room.get(CONF_ROOM_CLIMATES, []) if samples.get(e)]
+            summary = await self.hass.async_add_executor_job(
+                lambda series=series, schedule=schedule: summarize_setpoints(
+                    series, start, end, schedule.start, schedule.end,
+                    to_local=dt_util.as_local,
+                )
+            )
+            measured_now = self.room_measurements(room)
+            day_target = summary["day"]
+            if day_target is None:
+                day_target = self.comfort_temperature(room, measured_now)
+            inside = summary["measured"]
+            if inside is None:
+                inside = measured_now["current_temperature"]
+            estimate = self.model(room_id).estimate
+            delta = inside - outdoor if inside is not None and outdoor is not None else None
+            offset = schedule.offset
+            if schedule.night_temp is not None and day_target is not None:
+                offset = min(0.0, schedule.night_temp - day_target)
+            rooms.append(
+                RoomInput(
+                    room_id=room_id,
+                    name=room[CONF_ROOM_NAME],
+                    weight=max(1, len(room.get(CONF_ROOM_CLIMATES, []))),
+                    day_target=day_target,
+                    night_target=summary["night"],
+                    measured=inside,
+                    cooling=estimate.cooling_coefficient,
+                    heat_rate=estimate.heating_rate(delta),
+                    confidence=estimate.confidence,
+                    setback_enabled=self.room_enabled(room_id),
+                    night_hours=window_hours(schedule.start, schedule.end),
+                    offset=offset,
+                    uses_global=room.get(CONF_ROOM_USE_GLOBAL, True),
+                    optimum_start=schedule.optimum_start,
+                    label=ranking.get(room_id),
+                )
+            )
+        cfg = self.config
+        boiler = self.boiler_status() if self.boiler_configured else None
+        periods = self.setting_periods()
+        for period in periods:
+            day = date.fromisoformat(period["start"])
+            period["start_label"] = f"{day.day} {MONTHS[day.month - 1]}"
+        known = [p for p in periods[:-1] if p["predicted"] is not None and p["days"]]
+        house = HouseInput(
+            outdoor_mean=outdoor,
+            heating_gas_per_day=heating_gas,
+            gas_price=self.data.gas_price if self.data else self._gas_price()[0],
+            days=len(records),
+            measured_days=len(measured),
+            measured_expected=sum(r["expected"] for r in measured),
+            measured_actual=sum(r["gas"] for r in measured),
+            master_enabled=self.master_enabled,
+            global_offset=float(cfg.get(CONF_NIGHT_OFFSET, DEFAULT_NIGHT_OFFSET)),
+            global_hours=window_hours(
+                parse_time(cfg.get(CONF_NIGHT_START) or DEFAULT_NIGHT_START),
+                parse_time(cfg.get(CONF_NIGHT_END) or DEFAULT_NIGHT_END),
+            ),
+            boiler_cycling=bool(boiler and boiler.get("cycling")),
+            predicted_saving_known=sum(p["predicted"] * p["expected"] for p in known),
+            expected_unknown=sum(r["expected"] for r in measured)
+            - sum(p["expected"] for p in known),
+            periods=periods,
+        )
+        result = build_advice(rooms, house)
+        result["periods"] = periods
+        # Remember what the model predicted for the current setting, so the
+        # measurement of this period can calibrate later advice.
+        stored = self._history["periods"]
+        predicted = result["basis"]["predicted_fraction"]
+        if stored and stored[-1].get("predicted") != round(predicted, 4):
+            stored[-1]["predicted"] = round(predicted, 4)
+            self._async_save_history()
+        result["basis"]["measurement_start"] = self._measurement_start().isoformat()
+        result["basis"]["generated"] = now.isoformat()
+        self._advice = (now, result)
+        return result
 
     # ------------------------------------------------------------------
     # Savings total (restored by the sensor via RestoreEntity)

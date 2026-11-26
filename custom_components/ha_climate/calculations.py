@@ -229,6 +229,11 @@ class FireplaceDetector:
       while the floor heating did not heat during ``heating_cooldown``.
 
     A hysteresis of half the threshold prevents flapping.
+
+    When the target is lowered (by hand or by a schedule) the room is above
+    its new target for hours while it cools down. That is not a fireplace, so
+    after a lower target only a real temperature *rise* counts, until the room
+    has cooled down to the new target.
     """
 
     threshold: float = 0.5
@@ -238,6 +243,8 @@ class FireplaceDetector:
     last_heating: datetime | None = None
     delta_to_target: float | None = None
     rise: float | None = None
+    target: float | None = None
+    settling: bool = False  # target was lowered, room still cooling down
     _samples: deque[tuple[datetime, float]] = field(default_factory=deque, repr=False)
 
     def update(
@@ -268,6 +275,14 @@ class FireplaceDetector:
             else None
         )
         self.rise = current_temperature - min(t for _, t in self._samples)
+        if target_temperature is not None:
+            if self.target is not None and target_temperature < self.target - 0.05:
+                self.settling = True
+            self.target = target_temperature
+        if self.settling and (
+            self.delta_to_target is None or self.delta_to_target <= self.threshold / 2
+        ):
+            self.settling = False
 
         if heating:
             self.active = False
@@ -277,11 +292,19 @@ class FireplaceDetector:
             self.last_heating is None or now - self.last_heating >= self.heating_cooldown
         )
         rising = cooled_down and self.rise >= self.threshold
-        above = self.delta_to_target is not None and self.delta_to_target >= self.threshold
+        above = (
+            not self.settling
+            and self.delta_to_target is not None
+            and self.delta_to_target >= self.threshold
+        )
 
         if self.active:
             release = self.threshold / 2
-            still_warm = self.delta_to_target is not None and self.delta_to_target > release
+            still_warm = (
+                not self.settling
+                and self.delta_to_target is not None
+                and self.delta_to_target > release
+            )
             self.active = still_warm or rising
         else:
             self.active = above or rising
@@ -291,6 +314,8 @@ class FireplaceDetector:
         """Forget all samples."""
         self._samples.clear()
         self.active = False
+        self.settling = False
+        self.target = None
         self.delta_to_target = None
         self.rise = None
 

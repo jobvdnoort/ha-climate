@@ -84,6 +84,8 @@ DEFAULT_COMFORT_TIME: Final = "07:00:00"
 DEFAULT_FIXED_COSTS_UNIT: Final = "month"
 # Share of time heating is evaluated over this period for the room ranking.
 RANKING_DAYS: Final = 7
+ADVICE_DAYS: Final = 10  # days of setpoints and gas the advice is based on
+ADVICE_CACHE: Final = timedelta(minutes=10)
 MAX_EVENTS: Final = 2000
 AIRCO_ACTIVE_ACTIONS: Final = frozenset({"heating", "cooling", "preheating"})
 AIRCO_DEFAULT_COOL_TEMP: Final = 22.0

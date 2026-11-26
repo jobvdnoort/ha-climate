@@ -204,3 +204,43 @@ async def async_boiler_trace(
     seconds = int(step.total_seconds())
     first = dt_util.utc_from_timestamp((int(start.timestamp()) // seconds + 1) * seconds)
     return await hass.async_add_executor_job(resample, columns, first, end, step)
+
+
+async def async_climate_samples(
+    hass: HomeAssistant, entity_ids: list[str], days: int
+) -> dict[str, list[tuple[datetime, float | None, float | None]]]:
+    """(time, target, current temperature) of climate entities over the last days."""
+    if not entity_ids:
+        return {}
+    end = dt_util.utcnow()
+    start = end - timedelta(days=days)
+    recorder = get_instance(hass)
+    states: dict[str, list[State]] = await recorder.async_add_executor_job(
+        partial(
+            history.get_significant_states,
+            hass,
+            start,
+            end,
+            entity_ids,
+            include_start_time_state=True,
+            significant_changes_only=False,
+            minimal_response=False,
+            no_attributes=False,
+        )
+    )
+    result = {}
+    for entity_id in entity_ids:
+        samples = []
+        for state in states.get(entity_id, []):
+            if state.state in (STATE_UNAVAILABLE, STATE_UNKNOWN, "off"):
+                samples.append((state.last_updated, None, None))
+                continue
+            samples.append(
+                (
+                    state.last_updated,
+                    _float(state.attributes.get("temperature")),
+                    _float(state.attributes.get(ATTR_CURRENT_TEMPERATURE)),
+                )
+            )
+        result[entity_id] = samples
+    return result

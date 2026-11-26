@@ -1,4 +1,4 @@
-"""Room temperature control, aircos, frozen baseline, events, export and costs."""
+"""Room temperature control, aircos, savings start, advice, events, export and costs."""
 
 from __future__ import annotations
 
@@ -129,8 +129,8 @@ async def test_active_airco_is_excluded_from_model(hass, ha_climate_enabled) -> 
 
 
 @pytest.mark.usefixtures("recorder_mock")
-async def test_freeze_savings_start_events_and_export(hass, ha_climate_enabled, hass_ws_client) -> None:
-    """Frozen baseline, savings from a start date, change events and CSV rows."""
+async def test_savings_start_events_and_export(hass, ha_climate_enabled, hass_ws_client) -> None:
+    """Baseline from the days before the savings start, change events and CSV rows."""
     _states(hass)
     async_mock_service(hass, "climate", "set_temperature")
     _import(hass, temp_days=30, gas_days=30)
@@ -144,15 +144,29 @@ async def test_freeze_savings_start_events_and_export(hass, ha_climate_enabled, 
     today = dt_util.now().date()
     start = today - timedelta(days=10)
     await client.send_json_auto_id(
-        {"type": "ha_climate/baseline/freeze", "freeze": True, "savings_start": start.isoformat()}
+        {"type": "ha_climate/settings/save", "settings": {"savings_start": start.isoformat()}}
     )
     msg = await client.receive_json()
     assert msg["success"], msg
     coordinator = entry.runtime_data
+    await coordinator.async_recalculate_baseline()
     info = coordinator.baseline_info()
-    assert info["frozen"]["m3_per_degree_day"] == pytest.approx(0.4, abs=1e-6)
     assert info["savings_start"] == start.isoformat()
+    assert info["baseline_end"] == start.isoformat()
+    assert coordinator.baseline.last_day < start
     assert coordinator.effective_baseline == pytest.approx(0.4, abs=1e-6)
+
+    # Tips: measured days since the start and estimates per month.
+    await client.send_json_auto_id({"type": "ha_climate/advice", "refresh": True})
+    msg = await client.receive_json()
+    assert msg["success"], msg
+    advice = msg["result"]
+    assert advice["basis"]["measured_days"] == 10
+    assert advice["basis"]["days"] == 10
+    ids = {t["id"] for t in advice["tips"]}
+    assert "measurement" in ids
+    assert "day-lower" in ids
+    assert advice["rooms"][0]["day_target"] == pytest.approx(20.25)
 
     rows = await coordinator.async_history(30)
     before = [r for r in rows if r["date"] < start.isoformat()]
@@ -171,9 +185,17 @@ async def test_freeze_savings_start_events_and_export(hass, ha_climate_enabled, 
     await hass.async_block_till_done()
     coordinator = entry.runtime_data
     texts = [e["text"] for e in coordinator._history["events"]]  # noqa: SLF001
-    assert any(t.startswith("Baseline bevroren op 0,400") for t in texts)
     assert "Nachtverlaging uit (alle thermostaten, -2,0 °C, 22:00–06:30)" in texts
     assert "Nachtverlaging aangepast: -1,5 °C, 21:30–06:30" in texts
+
+    # Every night setting gets its own measured period.
+    periods = coordinator.setting_periods()
+    assert periods[0]["start"] == start.isoformat()
+    assert periods[0]["days"] == 10
+    assert periods[0]["text"] == "Nachtverlaging -2,0 °C, 22:00–06:30"
+    assert periods[-1]["current"] is True
+    assert periods[-1]["text"] == "Nachtverlaging uit"
+    assert periods[-1]["settings"]["night_offset"] == -1.5
 
     # Export contains every stored day and today's events.
     await client.send_json_auto_id({"type": "ha_climate/export"})

@@ -185,7 +185,8 @@ def async_register_websocket_api(hass: HomeAssistant) -> None:
         ws_export,
         ws_set_room_temperature,
         ws_airco,
-        ws_freeze_baseline,
+        ws_advice,
+        ws_fireplace_clear,
         ws_history,
         ws_boiler_trace,
         ws_save_room,
@@ -371,10 +372,12 @@ async def ws_state(hass, connection, msg, entry: HaClimateConfigEntry) -> None:
                 "delta_to_target": _round(detector.delta_to_target, 2),
                 "rise": _round(detector.rise, 2),
                 "minutes_today": coordinator.fireplace_minutes_today(),
+                "recent": coordinator.fireplace_recent(),
             },
             "boiler": coordinator.boiler_status(),
             "rooms": [_room_payload(coordinator, room) for room in coordinator.rooms],
             "ranking": coordinator.room_ranking(),
+            "periods": coordinator.setting_periods(),
             "now": dt_util.now().isoformat(),
         },
     )
@@ -699,31 +702,35 @@ async def ws_airco(hass, connection, msg, entry: HaClimateConfigEntry) -> None:
 
 @websocket_api.websocket_command(
     {
-        vol.Required("type"): "ha_climate/baseline/freeze",
+        vol.Required("type"): "ha_climate/advice",
         vol.Optional("entry_id"): str,
-        vol.Required("freeze"): bool,
-        vol.Optional("savings_start"): vol.Any(None, "", _date),
+        vol.Optional("refresh", default=False): bool,
+    }
+)
+@websocket_api.async_response
+@_with_entry
+async def ws_advice(hass, connection, msg, entry: HaClimateConfigEntry) -> None:
+    """Saving tips based on the last days and the learned room models."""
+    try:
+        result = await entry.runtime_data.async_advice(force=msg["refresh"])
+    except Exception:  # noqa: BLE001
+        _LOGGER.exception("Building the advice failed")
+        connection.send_error(msg["id"], "failed", "Tips konden niet worden berekend")
+        return
+    connection.send_result(msg["id"], result)
+
+
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): "ha_climate/fireplace/clear",
+        vol.Optional("entry_id"): str,
+        vol.Required("day"): _date,
     }
 )
 @websocket_api.require_admin
 @websocket_api.async_response
 @_with_entry
-async def ws_freeze_baseline(hass, connection, msg, entry: HaClimateConfigEntry) -> None:
-    """Freeze/unfreeze the baseline and optionally set the savings start date."""
-    coordinator = entry.runtime_data
-    try:
-        coordinator.freeze_baseline(msg["freeze"])
-    except HomeAssistantError as err:
-        connection.send_error(msg["id"], "failed", str(err))
-        return
-    if "savings_start" in msg:
-        options = dict(entry.options)
-        if msg["savings_start"]:
-            options[CONF_SAVINGS_START] = msg["savings_start"]
-        else:
-            options.pop(CONF_SAVINGS_START, None)
-        if options != dict(entry.options):
-            coordinator = await _async_update_options(hass, entry, options)
-    await coordinator.async_recalculate_baseline()
-    await coordinator.async_refresh()
-    connection.send_result(msg["id"], {"baseline": coordinator.baseline_info()})
+async def ws_fireplace_clear(hass, connection, msg, entry: HaClimateConfigEntry) -> None:
+    """Forget the fireplace minutes of a day that was detected wrongly."""
+    entry.runtime_data.clear_fireplace_day(date.fromisoformat(msg["day"]))
+    connection.send_result(msg["id"], {})
