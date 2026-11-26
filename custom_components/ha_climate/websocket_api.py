@@ -185,7 +185,7 @@ def async_register_websocket_api(hass: HomeAssistant) -> None:
         ws_export,
         ws_set_room_temperature,
         ws_airco,
-        ws_freeze_baseline,
+        ws_advice,
         ws_history,
         ws_boiler_trace,
         ws_save_room,
@@ -699,31 +699,19 @@ async def ws_airco(hass, connection, msg, entry: HaClimateConfigEntry) -> None:
 
 @websocket_api.websocket_command(
     {
-        vol.Required("type"): "ha_climate/baseline/freeze",
+        vol.Required("type"): "ha_climate/advice",
         vol.Optional("entry_id"): str,
-        vol.Required("freeze"): bool,
-        vol.Optional("savings_start"): vol.Any(None, "", _date),
+        vol.Optional("refresh", default=False): bool,
     }
 )
-@websocket_api.require_admin
 @websocket_api.async_response
 @_with_entry
-async def ws_freeze_baseline(hass, connection, msg, entry: HaClimateConfigEntry) -> None:
-    """Freeze/unfreeze the baseline and optionally set the savings start date."""
-    coordinator = entry.runtime_data
+async def ws_advice(hass, connection, msg, entry: HaClimateConfigEntry) -> None:
+    """Saving tips based on the last days and the learned room models."""
     try:
-        coordinator.freeze_baseline(msg["freeze"])
-    except HomeAssistantError as err:
-        connection.send_error(msg["id"], "failed", str(err))
+        result = await entry.runtime_data.async_advice(force=msg["refresh"])
+    except Exception:  # noqa: BLE001
+        _LOGGER.exception("Building the advice failed")
+        connection.send_error(msg["id"], "failed", "Tips konden niet worden berekend")
         return
-    if "savings_start" in msg:
-        options = dict(entry.options)
-        if msg["savings_start"]:
-            options[CONF_SAVINGS_START] = msg["savings_start"]
-        else:
-            options.pop(CONF_SAVINGS_START, None)
-        if options != dict(entry.options):
-            coordinator = await _async_update_options(hass, entry, options)
-    await coordinator.async_recalculate_baseline()
-    await coordinator.async_refresh()
-    connection.send_result(msg["id"], {"baseline": coordinator.baseline_info()})
+    connection.send_result(msg["id"], result)
