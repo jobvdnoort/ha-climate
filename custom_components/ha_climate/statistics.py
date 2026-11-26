@@ -48,7 +48,14 @@ async def async_period_value(
         _LOGGER.debug("Could not read statistics for %s", statistic_id, exc_info=True)
         return None
     value = result.get(stat_type)
-    return float(value) if value is not None else None
+    if value is None:
+        return None
+    value = float(value)
+    if stat_type == "change" and value < 0:
+        # A meter cannot run backwards: meter swap/reset or inconsistent statistics.
+        _LOGGER.debug("Ignoring negative change %.3f for %s", value, statistic_id)
+        return None
+    return value
 
 
 async def async_daily_history(
@@ -77,7 +84,11 @@ async def async_daily_history(
 
     gas: dict[date, float | None] = {}
     for row in stats.get(gas_id, []):
-        gas[_row_start(row["start"]).date()] = row.get("change")
+        change = row.get("change")
+        # Negative usage is impossible (meter reset/replacement): treat as missing.
+        gas[_row_start(row["start"]).date()] = (
+            change if change is None or change >= 0 else None
+        )
 
     return [
         DayRecord(day=day, mean_temperature=temps.get(day), gas=gas.get(day))

@@ -19,6 +19,8 @@ from homeassistant.helpers import selector
 
 from .const import (
     CONF_BASELINE_DAYS,
+    CONF_COMFORT_TIME,
+    CONF_DAY_TEMP,
     CONF_FIREPLACE_CLIMATE,
     CONF_FIREPLACE_TEMP_SENSOR,
     CONF_FIREPLACE_THRESHOLD,
@@ -29,6 +31,8 @@ from .const import (
     CONF_NIGHT_END,
     CONF_NIGHT_OFFSET,
     CONF_NIGHT_START,
+    CONF_NIGHT_TEMP,
+    CONF_OPTIMUM_START,
     CONF_OUTDOOR_SENSOR,
     CONF_ROOM_CLIMATES,
     CONF_ROOM_ID,
@@ -37,6 +41,7 @@ from .const import (
     CONF_ROOM_USE_GLOBAL,
     CONF_ROOMS,
     DEFAULT_BASELINE_DAYS,
+    DEFAULT_COMFORT_TIME,
     DEFAULT_FIREPLACE_THRESHOLD,
     DEFAULT_HEATING_LIMIT,
     DEFAULT_NIGHT_END,
@@ -161,7 +166,32 @@ def _room_schema(values: dict[str, Any], defaults: dict[str, Any]) -> vol.Schema
                 CONF_ROOM_USE_GLOBAL, default=values.get(CONF_ROOM_USE_GLOBAL, True)
             ): selector.BooleanSelector(),
             **_night_fields(night_defaults),
+            vol.Optional(
+                CONF_DAY_TEMP, description=_suggest(values, CONF_DAY_TEMP)
+            ): _temperature_selector(),
+            vol.Optional(
+                CONF_NIGHT_TEMP, description=_suggest(values, CONF_NIGHT_TEMP)
+            ): _temperature_selector(),
+            vol.Required(
+                CONF_COMFORT_TIME,
+                default=values.get(CONF_COMFORT_TIME) or DEFAULT_COMFORT_TIME,
+            ): selector.TimeSelector(),
+            vol.Required(
+                CONF_OPTIMUM_START, default=values.get(CONF_OPTIMUM_START, False)
+            ): selector.BooleanSelector(),
         }
+    )
+
+
+def _temperature_selector() -> selector.NumberSelector:
+    return selector.NumberSelector(
+        selector.NumberSelectorConfig(
+            min=5,
+            max=30,
+            step=0.5,
+            unit_of_measurement="°C",
+            mode=selector.NumberSelectorMode.BOX,
+        )
     )
 
 
@@ -349,7 +379,7 @@ class HaClimateOptionsFlow(OptionsFlow):
         if user_input is not None:
             errors = self._validate_room(user_input, self._room_id)
             if not errors:
-                room.update(user_input)
+                room.update({CONF_DAY_TEMP: None, CONF_NIGHT_TEMP: None, **user_input})
                 return self._save({CONF_ROOMS: rooms})
         return self.async_show_form(
             step_id="room",
@@ -419,5 +449,8 @@ class HaClimateOptionsFlow(OptionsFlow):
             }
             if used & set(user_input[CONF_ROOM_CLIMATES]):
                 errors[CONF_ROOM_CLIMATES] = "climate_in_use"
+        day, night = user_input.get(CONF_DAY_TEMP), user_input.get(CONF_NIGHT_TEMP)
+        if day is not None and night is not None and night >= day:
+            errors[CONF_NIGHT_TEMP] = "night_above_day"
         user_input[CONF_ROOM_NAME] = name
         return errors

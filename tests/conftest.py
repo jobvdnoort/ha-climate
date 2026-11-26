@@ -8,20 +8,19 @@ import sys
 
 import pytest
 
-MODULE_PATH = (
-    Path(__file__).parent.parent / "custom_components" / "ha_climate" / "calculations.py"
-)
+PACKAGE = Path(__file__).parent.parent / "custom_components" / "ha_climate"
 
 
-def _load_calculations():
-    spec = importlib.util.spec_from_file_location("ha_climate_calculations", MODULE_PATH)
+def _load(name: str):
+    spec = importlib.util.spec_from_file_location(f"ha_climate_{name}", PACKAGE / f"{name}.py")
     module = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = module
     spec.loader.exec_module(module)
     return module
 
 
-calc = _load_calculations()
+calc = _load("calculations")
+thermal = _load("thermal")
 
 
 @pytest.fixture

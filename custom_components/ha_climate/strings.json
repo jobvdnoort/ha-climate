@@ -34,7 +34,8 @@
       "name_required": "Please enter a room name.",
       "name_exists": "A room with this name already exists.",
       "climates_required": "Select at least one floor heating loop.",
-      "climate_in_use": "One of these loops is already assigned to another room."
+      "climate_in_use": "One of these loops is already assigned to another room.",
+      "night_above_day": "The night temperature must be lower than the day temperature."
     },
     "abort": {
       "already_configured": "This gas sensor is already configured."
@@ -90,10 +91,16 @@
           "use_global_night": "Use global night setback",
           "night_start": "Setback start time",
           "night_end": "End time / morning restore",
-          "night_offset": "Temperature setback"
+          "night_offset": "Temperature setback",
+          "day_temp": "Day temperature (optional)",
+          "night_temp": "Fixed night temperature (optional)",
+          "comfort_time": "At temperature by",
+          "optimum_start": "Optimum start"
         },
         "data_description": {
-          "use_global_night": "Turn off to use the times and setback below for this room."
+          "use_global_night": "Turn off to use the times and setback below for this room.",
+          "night_temp": "When set, this temperature is used at night instead of the relative setback.",
+          "optimum_start": "Start heating automatically based on the learned thermal model so the room reaches the day temperature at the set time."
         }
       },
       "room": {
@@ -105,10 +112,16 @@
           "use_global_night": "Use global night setback",
           "night_start": "Setback start time",
           "night_end": "End time / morning restore",
-          "night_offset": "Temperature setback"
+          "night_offset": "Temperature setback",
+          "day_temp": "Day temperature (optional)",
+          "night_temp": "Fixed night temperature (optional)",
+          "comfort_time": "At temperature by",
+          "optimum_start": "Optimum start"
         },
         "data_description": {
-          "use_global_night": "Turn off to use the times and setback below for this room."
+          "use_global_night": "Turn off to use the times and setback below for this room.",
+          "night_temp": "When set, this temperature is used at night instead of the relative setback.",
+          "optimum_start": "Start heating automatically based on the learned thermal model so the room reaches the day temperature at the set time."
         }
       },
       "edit_room": {
@@ -143,7 +156,8 @@
       "name_required": "Please enter a room name.",
       "name_exists": "A room with this name already exists.",
       "climates_required": "Select at least one floor heating loop.",
-      "climate_in_use": "One of these loops is already assigned to another room."
+      "climate_in_use": "One of these loops is already assigned to another room.",
+      "night_above_day": "The night temperature must be lower than the day temperature."
     }
   },
   "entity": {
@@ -159,7 +173,7 @@
     },
     "switch": {
       "night_setback": {
-        "name": "Night setback"
+        "name": "All thermostats night setback"
       },
       "room_night_setback": {
         "name": "Night setback {room}"
@@ -204,6 +218,18 @@
       },
       "saved_money_total": {
         "name": "Savings total"
+      },
+      "room_cooling_rate": {
+        "name": "Cooling rate {room}"
+      },
+      "room_heating_rate": {
+        "name": "Heating rate {room}"
+      },
+      "room_model_confidence": {
+        "name": "Model confidence {room}"
+      },
+      "room_heating_start": {
+        "name": "Heating start {room}"
       }
     }
   },

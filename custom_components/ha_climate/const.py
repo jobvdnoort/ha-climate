@@ -26,6 +26,10 @@ CONF_ROOM_NAME: Final = "name"
 CONF_ROOM_CLIMATES: Final = "climates"
 CONF_ROOM_USE_GLOBAL: Final = "use_global_night"
 CONF_ROOM_SELECT: Final = "room"
+CONF_DAY_TEMP: Final = "day_temp"
+CONF_NIGHT_TEMP: Final = "night_temp"
+CONF_COMFORT_TIME: Final = "comfort_time"
+CONF_OPTIMUM_START: Final = "optimum_start"
 
 CONF_FIREPLACE_CLIMATE: Final = "fireplace_climate"
 CONF_FIREPLACE_TEMP_SENSOR: Final = "fireplace_temp_sensor"
@@ -38,6 +42,9 @@ DEFAULT_NIGHT_START: Final = "22:00:00"
 DEFAULT_NIGHT_END: Final = "06:30:00"
 DEFAULT_NIGHT_OFFSET: Final = -2.0
 DEFAULT_FIREPLACE_THRESHOLD: Final = 0.5
+DEFAULT_COMFORT_TIME: Final = "07:00:00"
+# Used for the euro savings when no gas price is configured (NL 2026, incl. taxes).
+DEFAULT_GAS_PRICE: Final = 1.40
 
 # --- Tuning -----------------------------------------------------------------
 UPDATE_INTERVAL: Final = timedelta(minutes=5)
@@ -58,6 +65,13 @@ STORAGE_VERSION: Final = 1
 STORAGE_KEY: Final = f"{DOMAIN}.storage"
 # Number of days kept in the persisted day-based history.
 HISTORY_RETENTION_DAYS: Final = 800
+
+# --- Frontend panel ---------------------------------------------------------
+PANEL_URL_PATH: Final = "ha-climate"
+PANEL_COMPONENT: Final = "ha-climate-panel"
+PANEL_STATIC_URL: Final = "/ha_climate_static"
+PANEL_ICON: Final = "mdi:thermostat"
+PANEL_TITLE: Final = "HA Climate"
 
 # --- Services ---------------------------------------------------------------
 SERVICE_RECALCULATE_BASELINE: Final = "recalculate_baseline"
