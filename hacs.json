@@ -1,0 +1,7 @@
+{
+  "name": "HA Climate – Graaddagen & Nachtverlaging",
+  "content_in_root": false,
+  "render_readme": true,
+  "homeassistant": "2025.2.0",
+  "country": ["NL", "BE"]
+}

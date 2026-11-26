@@ -1,0 +1,27 @@
+{
+  "entity": {
+    "binary_sensor": {
+      "fireplace_active": { "default": "mdi:fireplace-off", "state": { "on": "mdi:fireplace" } }
+    },
+    "button": {
+      "recalculate_baseline": { "default": "mdi:calculator-variant" }
+    },
+    "switch": {
+      "night_setback": { "default": "mdi:weather-night" },
+      "room_night_setback": { "default": "mdi:bed-clock" }
+    },
+    "sensor": {
+      "expected_gas_today": { "default": "mdi:fire-circle" },
+      "expected_gas_yesterday": { "default": "mdi:fire-circle" },
+      "saved_gas_today": { "default": "mdi:piggy-bank-outline" },
+      "saved_gas_yesterday": { "default": "mdi:piggy-bank-outline" },
+      "saved_gas_total": { "default": "mdi:piggy-bank" },
+      "saved_money_today": { "default": "mdi:cash-plus" },
+      "saved_money_yesterday": { "default": "mdi:cash-plus" },
+      "saved_money_total": { "default": "mdi:cash-multiple" }
+    }
+  },
+  "services": {
+    "recalculate_baseline": { "service": "mdi:calculator-variant" }
+  }
+}

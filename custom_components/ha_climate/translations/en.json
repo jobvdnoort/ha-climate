@@ -1,0 +1,227 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Set up HA Climate",
+        "description": "Select the outdoor temperature and gas meter sensors. Both need long-term statistics (state_class). A price entity takes precedence over the fixed gas price.",
+        "data": {
+          "outdoor_sensor": "Outdoor temperature sensor",
+          "gas_sensor": "Gas consumption sensor (m³)",
+          "gas_price": "Gas price (fixed)",
+          "gas_price_entity": "Gas price entity (optional)",
+          "heating_limit": "Heating limit",
+          "baseline_days": "History used for baseline (days)"
+        },
+        "data_description": {
+          "heating_limit": "Degree days = max(0, heating limit − mean outdoor temperature). Default 18 °C."
+        }
+      },
+      "night": {
+        "title": "Night setback (global)",
+        "description": "Default settings for all rooms. Rooms can override the times.",
+        "data": {
+          "night_start": "Setback start time",
+          "night_end": "End time / morning restore",
+          "night_offset": "Temperature setback"
+        },
+        "data_description": {
+          "night_offset": "Negative number, e.g. −2.0 °C."
+        }
+      }
+    },
+    "error": {
+      "same_entity": "Outdoor temperature and gas consumption must be different entities.",
+      "name_required": "Please enter a room name.",
+      "name_exists": "A room with this name already exists.",
+      "climates_required": "Select at least one floor heating loop.",
+      "climate_in_use": "One of these loops is already assigned to another room."
+    },
+    "abort": {
+      "already_configured": "This gas sensor is already configured."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "HA Climate settings",
+        "description": "What would you like to change? Changes are saved immediately.",
+        "menu_options": {
+          "general": "Sensors, gas price & heating limit",
+          "night": "Night setback (global)",
+          "add_room": "Add room",
+          "edit_room": "Edit room",
+          "remove_room": "Remove room",
+          "fireplace": "Fireplace"
+        }
+      },
+      "general": {
+        "title": "Sensors & degree days",
+        "description": "Select the outdoor temperature and gas meter sensors. Both need long-term statistics (state_class). A price entity takes precedence over the fixed gas price.",
+        "data": {
+          "outdoor_sensor": "Outdoor temperature sensor",
+          "gas_sensor": "Gas consumption sensor (m³)",
+          "gas_price": "Gas price (fixed)",
+          "gas_price_entity": "Gas price entity (optional)",
+          "heating_limit": "Heating limit",
+          "baseline_days": "History used for baseline (days)"
+        },
+        "data_description": {
+          "heating_limit": "Degree days = max(0, heating limit − mean outdoor temperature). Default 18 °C."
+        }
+      },
+      "night": {
+        "title": "Night setback (global)",
+        "description": "Default settings for all rooms. Rooms can override the times.",
+        "data": {
+          "night_start": "Setback start time",
+          "night_end": "End time / morning restore",
+          "night_offset": "Temperature setback"
+        },
+        "data_description": {
+          "night_offset": "Negative number, e.g. −2.0 °C."
+        }
+      },
+      "add_room": {
+        "title": "Add room",
+        "description": "A room contains one or more floor heating loops (climate entities).",
+        "data": {
+          "name": "Room name",
+          "climates": "Floor heating loops",
+          "use_global_night": "Use global night setback",
+          "night_start": "Setback start time",
+          "night_end": "End time / morning restore",
+          "night_offset": "Temperature setback"
+        },
+        "data_description": {
+          "use_global_night": "Turn off to use the times and setback below for this room."
+        }
+      },
+      "room": {
+        "title": "Edit room {room}",
+        "description": "A room contains one or more floor heating loops (climate entities).",
+        "data": {
+          "name": "Room name",
+          "climates": "Floor heating loops",
+          "use_global_night": "Use global night setback",
+          "night_start": "Setback start time",
+          "night_end": "End time / morning restore",
+          "night_offset": "Temperature setback"
+        },
+        "data_description": {
+          "use_global_night": "Turn off to use the times and setback below for this room."
+        }
+      },
+      "edit_room": {
+        "title": "Edit room",
+        "data": {
+          "room": "Room"
+        }
+      },
+      "remove_room": {
+        "title": "Remove room",
+        "description": "Lowered loops in this room are restored automatically.",
+        "data": {
+          "room": "Room"
+        }
+      },
+      "fireplace": {
+        "title": "Fireplace",
+        "description": "Select the thermostat of the room with the fireplace. Leave empty to disable fireplace detection.",
+        "data": {
+          "fireplace_climate": "Fireplace room thermostat",
+          "fireplace_temp_sensor": "Separate temperature sensor (optional)",
+          "fireplace_threshold": "Threshold"
+        },
+        "data_description": {
+          "fireplace_temp_sensor": "Use this sensor instead of the thermostat's measured temperature.",
+          "fireplace_threshold": "Fireplace is active when the temperature exceeds the target by this amount, or rises this much within an hour, while the floor heating is not heating."
+        }
+      }
+    },
+    "error": {
+      "same_entity": "Outdoor temperature and gas consumption must be different entities.",
+      "name_required": "Please enter a room name.",
+      "name_exists": "A room with this name already exists.",
+      "climates_required": "Select at least one floor heating loop.",
+      "climate_in_use": "One of these loops is already assigned to another room."
+    }
+  },
+  "entity": {
+    "binary_sensor": {
+      "fireplace_active": {
+        "name": "Fireplace active"
+      }
+    },
+    "button": {
+      "recalculate_baseline": {
+        "name": "Recalculate baseline"
+      }
+    },
+    "switch": {
+      "night_setback": {
+        "name": "Night setback"
+      },
+      "room_night_setback": {
+        "name": "Night setback {room}"
+      }
+    },
+    "sensor": {
+      "degree_days_today": {
+        "name": "Degree days today"
+      },
+      "degree_days_yesterday": {
+        "name": "Degree days yesterday"
+      },
+      "baseline": {
+        "name": "Gas baseline per degree day"
+      },
+      "expected_gas_today": {
+        "name": "Expected gas usage today"
+      },
+      "expected_gas_yesterday": {
+        "name": "Expected gas usage yesterday"
+      },
+      "actual_gas_today": {
+        "name": "Actual gas usage today"
+      },
+      "actual_gas_yesterday": {
+        "name": "Actual gas usage yesterday"
+      },
+      "saved_gas_today": {
+        "name": "Gas saved today"
+      },
+      "saved_gas_yesterday": {
+        "name": "Gas saved yesterday"
+      },
+      "saved_gas_total": {
+        "name": "Gas saved total"
+      },
+      "saved_money_today": {
+        "name": "Savings today"
+      },
+      "saved_money_yesterday": {
+        "name": "Savings yesterday"
+      },
+      "saved_money_total": {
+        "name": "Savings total"
+      }
+    }
+  },
+  "services": {
+    "recalculate_baseline": {
+      "name": "Recalculate baseline",
+      "description": "Re-reads the long-term statistics and recalculates the gas baseline (m³ per degree day).",
+      "fields": {
+        "config_entry_id": {
+          "name": "Configuration",
+          "description": "Optional: only recalculate this HA Climate configuration."
+        }
+      }
+    }
+  },
+  "exceptions": {
+    "no_entry": {
+      "message": "No loaded HA Climate configuration found."
+    }
+  }
+}
