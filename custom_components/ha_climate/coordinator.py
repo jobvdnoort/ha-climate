@@ -69,6 +69,7 @@ from .calculations import (
     describe_night,
     describe_periods,
     hourly_comparison,
+    hourly_profile,
     rank_rooms,
     day_fraction,
     degree_days,
@@ -286,6 +287,7 @@ class HaClimateCoordinator(DataUpdateCoordinator[EnergyData]):
         self._unsub: list[CALLBACK_TYPE] = []
         self._setback_lock = asyncio.Lock()
         self.baseline: BaselineResult | None = None
+        self._profile_cache: tuple[tuple, tuple[list[float], int] | None] | None = None
         self.baseline_updated: datetime | None = None
         self.models: dict[str, RoomThermalModel] = {}
         self.plans: dict[str, dict[str, Any]] = {}
@@ -1822,14 +1824,59 @@ class HaClimateCoordinator(DataUpdateCoordinator[EnergyData]):
         hours = await async_hourly(
             self.hass, cfg[CONF_OUTDOOR_SENSOR], cfg[CONF_GAS_SENSOR], start, end
         )
+        try:
+            learned = await self._async_hourly_profile()
+        except Exception:  # noqa: BLE001
+            _LOGGER.debug("Could not learn the hourly profile", exc_info=True)
+            learned = None
+        profile, profile_days = learned if learned else (None, 0)
+
+        def day_temperature(value: date) -> float | None:
+            record = self._history["days"].get(value.isoformat())
+            return record[0] if record and value < dt_util.now().date() else None
+
         # Half past the hour: whether the hour was (mostly) lowered.
         result = hourly_comparison(
             hours,
             baseline,
             self.heating_limit_for,
             lambda hour: self.lowered_share(hour + timedelta(minutes=30)),
+            profile=profile,
+            day_temperature=day_temperature,
         )
-        return {**result, "baseline": baseline, "day": day.isoformat()}
+        return {
+            **result,
+            "baseline": baseline,
+            "day": day.isoformat(),
+            "profile_days": profile_days,
+        }
+
+    async def _async_hourly_profile(self) -> tuple[list[float], int] | None:
+        """How the house spread its gas over the day before the measurement.
+
+        Learned from the hourly statistics of the baseline period (at most the
+        last 90 days of it), without setback and fireplace days; cached until
+        the baseline period changes.
+        """
+        b = self.baseline
+        if b is None or b.first_day is None or b.last_day is None:
+            return None
+        first = max(b.first_day, b.last_day - timedelta(days=90))
+        fireplace, setback = self._excluded_days()
+        key = (first, b.last_day, self.heating_limit, self.indoor_correction)
+        if self._profile_cache is not None and self._profile_cache[0] == key:
+            return self._profile_cache[1]
+        cfg = self.config
+        hours = await async_hourly(
+            self.hass,
+            cfg[CONF_OUTDOOR_SENSOR],
+            cfg[CONF_GAS_SENSOR],
+            dt_util.start_of_local_day(first),
+            dt_util.start_of_local_day(b.last_day + timedelta(days=1)),
+        )
+        result = hourly_profile(hours, self.heating_limit_for, fireplace | setback)
+        self._profile_cache = (key, result)
+        return result
 
     def export_rows(self) -> list[dict[str, Any]]:
         """All permanently stored days (for the CSV export)."""

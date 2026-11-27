@@ -708,8 +708,12 @@ class HaClimatePanel extends HTMLElement {
         <div class="card-head"><h3>Per uur: wat levert de verlaging op?</h3></div>
         <div class="segmented small scroll day-select">${buttons}</div>
         ${body}
-        <p class="muted small">Van 12:00 de dag ervoor tot 24:00 (afgeronde uren). Verwacht per uur = baseline × (stookgrens − buitentemperatuur van dat uur) ÷ 24:
-          wat het huis zonder verlaging zou verbruiken. Tijdens de verlaging hoort het verbruik lager te liggen; daarna stookt de ketel extra om weer op te warmen.
+        <p class="muted small">Van 12:00 de dag ervoor tot 24:00 (afgeronde uren). ${h && h.profile_days
+          ? `Verwacht per uur = het verwachte dagverbruik, verdeeld over de uren zoals het huis vóór de start stookte (geleerd uit ${h.profile_days} koude dagen zonder verlaging).
+             Vaste gewoontes zoals douchen en de ochtendpiek zitten daar al in, en tellen dus niet als opwarmkosten.`
+          : `Verwacht per uur = baseline × (stookgrens − buitentemperatuur van dat uur) ÷ 24 (gelijk over de dag verdeeld; er zijn nog te weinig koude dagen zonder verlaging om het dagpatroon van het huis te leren).
+             Let op: de ochtend lijkt daardoor duurder dan hij is, want douchen en de ochtendpiek vallen op vaste uren.`}
+          Dit is wat het huis zonder verlaging zou verbruiken. Tijdens de verlaging hoort het verbruik lager te liggen; daarna stookt de ketel extra om weer op te warmen.
           Telt dat samen positief op, dan loont verlagen. Douchen en koken tellen mee, dus een enkel uur of een enkele dag zegt weinig – kijk naar meerdere dagen.
           Gearceerd = meer dan de helft van de lussen verlaagd volgens het huidige schema.</p>
       </div>`;
@@ -1282,14 +1286,15 @@ class HaClimatePanel extends HTMLElement {
       .map((p) => {
         const until = p.current ? "nu" : dateLabel(p.end);
         const pct = p.fraction === null || p.fraction === undefined ? null : p.fraction * 100;
-        const color = pct === null ? "" : savedClass(pct, 0.5);
+        const early = p.days > 0 && p.days < 3;
+        const color = pct === null || early ? "" : savedClass(pct, 0.5);
         const perMonth = p.per_day !== null && p.per_day !== undefined ? p.per_day * 30 * price : null;
         return `<tr class="${p.current ? "current" : ""}">
           <td>${dateLabel(p.start)} – ${until}</td>
           <td>${esc(p.text)}${p.current ? ' <span class="chip" style="--chip:var(--accent)">nu</span>' : ""}</td>
           <td class="num">${p.days}${p.fireplace_days ? `<br><small class="muted">+${p.fireplace_days} openhaard</small>` : ""}</td>
           <td class="num">${p.days ? `${fmt(p.actual, 1)} / ${fmt(p.expected, 1)} m³` : "–"}</td>
-          <td class="num ${color}"><b>${pct === null ? "–" : `${pct > 0 ? "−" : "+"}${fmt(Math.abs(pct), 0)} %`}</b></td>
+          <td class="num ${color}"><b>${pct === null ? "–" : `${pct > 0 ? "−" : "+"}${fmt(Math.abs(pct), 0)} %`}</b>${early ? '<br><small class="muted">voorlopig</small>' : ""}</td>
           <td class="num ${color}"><b>${perMonth === null ? "–" : euro(perMonth)}</b></td>
         </tr>`;
       })
@@ -1299,7 +1304,8 @@ class HaClimatePanel extends HTMLElement {
       <tbody>${rows}</tbody></table></div>
       <p class="muted small">Elke wijziging van de nachtverlaging (tijden, verlaging, aan/uit, per kamer) start een nieuwe periode; een wijziging na 12:00 telt vanaf de
         volgende dag. Alleen volledige dagen tellen, dagen met de openhaard niet.
-        <span class="good">Groen</span> = minder gas dan verwacht (bespaard), <span class="bad">rood</span> = meer gas dan verwacht.</p>`;
+        <span class="good">Groen</span> = minder gas dan verwacht (bespaard), <span class="bad">rood</span> = meer gas dan verwacht; pas vanaf 3 dagen gekleurd.
+        Of het opwarmen in de ochtend de nachtbesparing opeet, zie je per dag bij <i>Analyses → Per uur</i>.</p>`;
   }
 
   _renderFireplaceDays() {
