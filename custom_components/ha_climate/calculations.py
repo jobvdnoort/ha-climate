@@ -172,6 +172,41 @@ def parse_time(value: str | time) -> time:
     return time(parts[0], parts[1], parts[2])
 
 
+def parse_periods(value: object) -> tuple[tuple[time, time], ...]:
+    """Parse configured comfort periods into sorted (start, end) tuples.
+
+    Accepts ``[{"start": "06:30", "end": "07:30"}, ...]``; invalid or empty
+    periods (start == end) are skipped.
+    """
+    result: list[tuple[time, time]] = []
+    if not isinstance(value, (list, tuple)):
+        return ()
+    for item in value:
+        try:
+            start = parse_time(item["start"])
+            end = parse_time(item["end"])
+        except (KeyError, TypeError, ValueError, IndexError):
+            continue
+        if start != end:
+            result.append((start, end))
+    return tuple(sorted(result))
+
+
+def describe_periods(
+    periods: Iterable[tuple[time, time]],
+    offset: float | None = None,
+    night_temp: float | None = None,
+) -> str:
+    """Return e.g. ``comfort 06:30–07:30, 17:00–21:00, daarbuiten 16,0 °C``."""
+    amount = (
+        f"{format_number(night_temp)} °C"
+        if night_temp is not None
+        else f"{format_number(offset if offset is not None else 0.0)} °C"
+    )
+    blocks = ", ".join(f"{s.strftime('%H:%M')}–{e.strftime('%H:%M')}" for s, e in periods)
+    return f"comfort {blocks}, daarbuiten {amount}"
+
+
 def in_time_window(now: time, start: time, end: time) -> bool:
     """Return whether ``now`` lies in [start, end), supporting windows past midnight."""
     if start == end:

@@ -66,6 +66,7 @@ from .calculations import (
     corrected_heating_limit,
     daily_fixed_costs,
     describe_night,
+    describe_periods,
     rank_rooms,
     day_fraction,
     degree_days,
@@ -73,6 +74,7 @@ from .calculations import (
     fireplace_excluded_days,
     gas_savings,
     money,
+    parse_periods,
     parse_time,
     restore_value,
     setback_target,
@@ -96,6 +98,7 @@ from .const import (
     CONF_BOILER_STARTS_TODAY,
     CONF_BASELINE_DAYS,
     CONF_COMFORT_TIME,
+    CONF_PERIODS,
     CONF_DAY_TEMP,
     CONF_FIREPLACE_CLIMATE,
     CONF_FIREPLACE_TEMP_SENSOR,
@@ -166,6 +169,9 @@ from .thermal import (
     PreheatPlan,
     RoomThermalModel,
     model_stage,
+    comfort_gap,
+    next_comfort_gap_start,
+    setback_hours,
     night_period,
     preheat_lead,
 )
@@ -218,6 +224,8 @@ class RoomSchedule:
     night_temp: float | None
     comfort_time: time
     optimum_start: bool
+    # Comfort periods of the day; when set they replace the night window.
+    periods: tuple[tuple[time, time], ...] = ()
 
 
 @dataclass(slots=True)
@@ -347,6 +355,7 @@ class HaClimateCoordinator(DataUpdateCoordinator[EnergyData]):
             night_temp=_float_or_none(room.get(CONF_NIGHT_TEMP)),
             comfort_time=parse_time(room.get(CONF_COMFORT_TIME) or DEFAULT_COMFORT_TIME),
             optimum_start=bool(room.get(CONF_OPTIMUM_START, False)),
+            periods=parse_periods(room.get(CONF_PERIODS)),
         )
 
     # Backwards compatible name used by entities.
@@ -451,6 +460,9 @@ class HaClimateCoordinator(DataUpdateCoordinator[EnergyData]):
                 float(cfg.get(CONF_NIGHT_OFFSET, DEFAULT_NIGHT_OFFSET)),
             )
         schedule = self.schedule(room)
+        if schedule.periods:
+            text = describe_periods(schedule.periods, schedule.offset, schedule.night_temp)
+            return f"{text}, optimum start" if schedule.optimum_start else text
         end = schedule.comfort_time if schedule.optimum_start else schedule.end
         text = describe_night(
             schedule.start.strftime("%H:%M"),
@@ -1038,14 +1050,28 @@ class HaClimateCoordinator(DataUpdateCoordinator[EnergyData]):
     def _night_window(
         self, room: dict[str, Any], now: datetime, record: bool = True
     ) -> tuple[datetime, datetime, datetime]:
-        """Return (setback start, restore moment, comfort moment) for the current night."""
+        """Return (setback start, restore moment, comfort moment) for the current window.
+
+        Without comfort periods this is the night; with comfort periods it is
+        the gap between the previous and the next comfort period.
+        """
         schedule = self.schedule(room)
-        window_start, window_end = night_period(now, schedule.start, schedule.end)
+        if schedule.periods:
+            gap = comfort_gap(now, schedule.periods)
+            if gap is None:  # comfort all day: an empty window
+                return now, now, now
+            window_start, window_end = gap
+            comfort = window_end
+        else:
+            window_start, window_end = night_period(now, schedule.start, schedule.end)
+            if schedule.optimum_start:
+                _, comfort = night_period(now, schedule.start, schedule.comfort_time)
+            else:
+                comfort = window_end
         if not schedule.optimum_start:
             return window_start, window_end, window_end
-        _, comfort = night_period(now, schedule.start, schedule.comfort_time)
         plan = self.preheat_plan(room)
-        restore_at = comfort - plan.lead if plan else window_end
+        restore_at = max(window_start, comfort - plan.lead) if plan else window_end
         if record:
             self.plans[room[CONF_ROOM_ID]] = {
                 "comfort_at": comfort.isoformat(),
@@ -1057,15 +1083,20 @@ class HaClimateCoordinator(DataUpdateCoordinator[EnergyData]):
         return window_start, restore_at, comfort
 
     def next_heating_start(self, room: dict[str, Any]) -> datetime | None:
-        """Return the (planned) optimum start moment of the coming morning."""
-        if not self.schedule(room).optimum_start:
+        """Return the (planned) optimum start moment of the next comfort period."""
+        schedule = self.schedule(room)
+        if not schedule.optimum_start:
             return None
         now = dt_util.now()
         window_start, restore_at, comfort = self._night_window(room, now, record=False)
-        if comfort <= now:  # this morning is over: plan for the next night
-            _, restore_at, _ = self._night_window(
-                room, window_start + timedelta(days=1), record=False
-            )
+        if comfort <= now:  # this window is over: plan for the next one
+            if schedule.periods:
+                probe = next_comfort_gap_start(now, schedule.periods)
+                if probe is None:
+                    return None
+            else:
+                probe = window_start + timedelta(days=1)
+            _, restore_at, _ = self._night_window(room, probe, record=False)
         return restore_at
 
     async def _async_evaluate_setback(self, now: datetime) -> None:
@@ -1303,7 +1334,7 @@ class HaClimateCoordinator(DataUpdateCoordinator[EnergyData]):
         schedule = self.schedule(room)
         if schedule.optimum_start and restored_at is not None:
             now = dt_util.now()
-            window_start, comfort = night_period(now, schedule.start, schedule.comfort_time)
+            window_start, _, comfort = self._night_window(room, now, record=False)
             if window_start <= restored_at <= now < comfort:
                 return "preheating"
         if measured["heating"]:
@@ -1867,7 +1898,11 @@ class HaClimateCoordinator(DataUpdateCoordinator[EnergyData]):
                     heat_rate=estimate.heating_rate(delta),
                     confidence=estimate.confidence,
                     setback_enabled=self.room_enabled(room_id),
-                    night_hours=window_hours(schedule.start, schedule.end),
+                    night_hours=(
+                        setback_hours(schedule.periods)
+                        if schedule.periods
+                        else window_hours(schedule.start, schedule.end)
+                    ),
                     offset=offset,
                     uses_global=room.get(CONF_ROOM_USE_GLOBAL, True),
                     optimum_start=schedule.optimum_start,

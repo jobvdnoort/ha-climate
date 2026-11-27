@@ -233,3 +233,57 @@ async def test_fixed_cost_unit_migration(hass, ha_climate_enabled) -> None:
     assert entry.minor_version == 3
     assert entry.options["gas_fixed_costs_unit"] == "day"
     assert entry.runtime_data.data.fixed_costs == pytest.approx(0.6)
+
+
+@pytest.mark.usefixtures("recorder_mock")
+async def test_comfort_blocks(hass, ha_climate_enabled, hass_ws_client) -> None:
+    """Comfort blocks lower the room outside the blocks and plan optimum start per block."""
+    _states(hass)
+    entry = await _setup(hass)
+    coordinator = entry.runtime_data
+    client = await hass_ws_client(hass)
+
+    await client.send_json_auto_id(
+        {
+            "type": "ha_climate/room/save",
+            "room": {
+                "id": "r1", "day_temp": 21.0, "night_temp": 17.0, "optimum_start": True,
+                "periods": [{"start": "06:30", "end": "07:30"}, {"start": "17:00", "end": "21:00"}],
+            },
+        }
+    )
+    msg = await client.receive_json()
+    assert msg["success"], msg
+    coordinator = entry.runtime_data
+    room = coordinator.room("r1")
+    assert len(coordinator.schedule(room).periods) == 2
+    temp_calls = async_mock_service(hass, "climate", "set_temperature")
+
+    # Mid-day: between the blocks, so lowered to the night temperature.
+    noon = dt_util.now().replace(hour=12, minute=0, second=0, microsecond=0)
+    await coordinator._async_evaluate_setback(noon)
+    assert coordinator.room_setback_active("r1")
+    assert {c.data["temperature"] for c in temp_calls} == {17.0}
+    start = dt_util.parse_datetime(coordinator.plans["r1"]["heating_start"])
+    comfort = dt_util.parse_datetime(coordinator.plans["r1"]["comfort_at"])
+    assert comfort.hour == 17 and start < comfort
+
+    # Inside the evening block the room is back on its day temperature.
+    for entity_id in ("climate.loop1", "climate.loop2"):
+        hass.states.async_set(
+            entity_id, "heat",
+            {"temperature": 17.0, "current_temperature": 19.5, "hvac_action": "idle",
+             "min_temp": 5, "max_temp": 28},
+        )
+    temp_calls.clear()
+    await coordinator._async_evaluate_setback(noon.replace(hour=18))
+    assert not coordinator.room_setback_active("r1")
+    assert {c.data["temperature"] for c in temp_calls} == {21.0}
+
+    # Invalid block is refused.
+    await client.send_json_auto_id(
+        {"type": "ha_climate/room/save",
+         "room": {"id": "r1", "periods": [{"start": "08:00", "end": "08:00"}]}}
+    )
+    msg = await client.receive_json()
+    assert not msg["success"]

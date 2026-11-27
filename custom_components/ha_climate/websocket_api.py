@@ -17,8 +17,10 @@ from homeassistant.core import HomeAssistant, callback
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.util import dt as dt_util
 
-from .calculations import parse_time
+from .calculations import parse_periods, parse_time
 from .const import (
+    CONF_PERIODS,
+    MAX_PERIODS,
     BOILER_BINARY_KEYS,
     BOILER_KEYS,
     CONF_BASELINE_DAYS,
@@ -100,6 +102,7 @@ ROOM_KEYS = (
     CONF_NIGHT_TEMP,
     CONF_COMFORT_TIME,
     CONF_OPTIMUM_START,
+    CONF_PERIODS,
 )
 
 
@@ -139,6 +142,10 @@ ROOM_SCHEMA = vol.Schema(
         vol.Optional(CONF_NIGHT_TEMP): _TEMP,
         vol.Optional(CONF_COMFORT_TIME): _time,
         vol.Optional(CONF_OPTIMUM_START): bool,
+        vol.Optional(CONF_PERIODS): vol.All(
+            [vol.Schema({vol.Required("start"): _time, vol.Required("end"): _time})],
+            vol.Length(max=MAX_PERIODS),
+        ),
     }
 )
 
@@ -269,6 +276,10 @@ def _room_payload(coordinator: HaClimateCoordinator, room: dict[str, Any]) -> di
             "night_temp": schedule.night_temp,
             "comfort_time": schedule.comfort_time.strftime("%H:%M"),
             "optimum_start": schedule.optimum_start,
+            "periods": [
+                {"start": a.strftime("%H:%M"), "end": b.strftime("%H:%M")}
+                for a, b in schedule.periods
+            ],
         },
         "enabled": coordinator.room_enabled(room_id),
         "setback_active": coordinator.room_setback_active(room_id),
@@ -434,6 +445,11 @@ def _validate_room(
     climates = room.get(CONF_ROOM_CLIMATES) or []
     if not climates:
         return "Kies minimaal één vloerverwarmingslus."
+    periods = room.get(CONF_PERIODS) or []
+    if any(p["start"] == p["end"] for p in periods):
+        return "Een comfortblok moet een begin- en eindtijd hebben die verschillen."
+    if periods and len(parse_periods(periods)) != len(periods):
+        return "Een comfortblok is ongeldig."
     used = {
         entity
         for r in rooms

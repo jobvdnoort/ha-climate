@@ -411,8 +411,11 @@ class HaClimatePanel extends HTMLElement {
             </div>
             <div><div class="mid">${fmt(room.comfort_temperature, 1)}<small>°C</small></div><div class="muted">dag</div></div>
           </div>
-          <div class="row small"><span>Nacht</span><span>${room.schedule.night_start} – ${room.schedule.optimum_start ? room.schedule.comfort_time : room.schedule.night_end},
-            ${room.schedule.night_temp !== null ? fmt(room.schedule.night_temp, 1, "°C") : fmt(room.schedule.night_offset, 1, "°C")}</span></div>
+          ${room.schedule.periods && room.schedule.periods.length
+            ? `<div class="row small"><span>Comfort</span><span>${room.schedule.periods.map((p) => `${p.start}–${p.end}`).join(", ")};
+            anders ${room.schedule.night_temp !== null ? fmt(room.schedule.night_temp, 1, "°C") : fmt(room.schedule.night_offset, 1, "°C")}</span></div>`
+            : `<div class="row small"><span>Nacht</span><span>${room.schedule.night_start} – ${room.schedule.optimum_start ? room.schedule.comfort_time : room.schedule.night_end},
+            ${room.schedule.night_temp !== null ? fmt(room.schedule.night_temp, 1, "°C") : fmt(room.schedule.night_offset, 1, "°C")}</span></div>`}
           ${preheat}
           ${room.valves && room.valves.length ? this._renderValves(room) : ""}
           ${room.aircos && room.aircos.length ? this._renderAirco(room, admin) : ""}
@@ -513,8 +516,13 @@ class HaClimatePanel extends HTMLElement {
       (s) =>
         s.entity_id.startsWith("sensor.") &&
         (roomValves.includes(s.entity_id) ||
-          (s.attributes.unit_of_measurement === "%" && !["battery", "humidity", "moisture"].includes(s.attributes.device_class)))
+          (s.attributes.unit_of_measurement === "%" && !["battery", "humidity", "moisture"].includes(s.attributes.device_class)) ||
+          /stelgro|stelwaarde|klep|valve|command.?value/i.test(`${s.entity_id} ${s.attributes.friendly_name || ""}`))
     );
+    // Valve sensors that match the room name first, so the right ones are easy to find.
+    const roomWords = (room.name || "").toLowerCase().split(/[^a-z0-9]+/).filter((w) => w.length > 2 && !["en", "kamer"].includes(w));
+    const matches = (c) => roomWords.some((w) => c.name.toLowerCase().includes(w) || c.id.includes(w));
+    valveSensors.sort((a, b) => Number(matches(b)) - Number(matches(a)) || a.name.localeCompare(b.name));
     const climates = this._entities((s) => s.entity_id.startsWith("climate."));
     const list = climates
       .map((c) => {
@@ -550,9 +558,9 @@ class HaClimatePanel extends HTMLElement {
               const state = this._hass.states[c.id];
               return `<label class="check ${used ? "disabled" : ""}" data-name="${esc(c.name.toLowerCase())} ${esc(c.id)}">
                 <input type="checkbox" name="valve" value="${esc(c.id)}" ${roomValves.includes(c.id) ? "checked" : ""} ${used ? "disabled" : ""}>
-                <span>${esc(c.name)}<br><small class="muted">${esc(c.id)} · ${esc(state?.state ?? "–")} %${used ? " · in andere kamer" : ""}</small></span></label>`;
+                <span>${esc(c.name)}<br><small class="muted">${esc(c.id)} · ${esc(state?.state ?? "–")} ${esc(state?.attributes.unit_of_measurement ?? "")}${used ? " · in andere kamer" : ""}</small></span></label>`;
             })
-            .join("") : '<p class="muted small">Geen sensoren met eenheid % gevonden.</p>'}</div>
+            .join("") : '<p class="muted small">Geen klepstand-sensoren gevonden (sensor met eenheid % of met stelgrootte/klep in de naam).</p>'}</div>
           <p class="muted small">Bijv. KNX- of vloerverwarmingsactoren (0–100 %). Indien gekoppeld gebruikt HA Climate de gemiddelde klepopening voor het stookpercentage en het thermische model (opwarmsnelheid).</p>
           <p class="muted small">De schema's (dag-/nachttemperatuur, tijden, optimum start) stel je in op het tabblad Schema's.</p>
           <div class="actions">
@@ -1021,6 +1029,15 @@ class HaClimatePanel extends HTMLElement {
   }
 
   /* ----- Schedules ----- */
+  _periodRow(p = { start: "17:00", end: "21:00" }, dis = "") {
+    return `<div class="period-row">
+      <input name="period_start" type="time" value="${esc(hhmm(p.start))}" ${dis} aria-label="Begin blok">
+      <span class="muted">–</span>
+      <input name="period_end" type="time" value="${esc(hhmm(p.end))}" ${dis} aria-label="Einde blok">
+      ${dis ? "" : `<button class="btn text small danger" type="button" data-period-remove aria-label="Blok verwijderen">✕</button>`}
+    </div>`;
+  }
+
   _renderSchedules() {
     const s = this._state;
     const admin = this._admin;
@@ -1032,6 +1049,8 @@ class HaClimatePanel extends HTMLElement {
         const sch = room.schedule;
         const absolute = c.night_temp !== null && c.night_temp !== undefined;
         const global = c.use_global_night !== false;
+        const periods = sch.periods || [];
+        const blocks = periods.length > 0;
         return `
         <form class="card schedule" data-room="${room.id}">
           <div class="room-head"><div class="room-name">${esc(room.name)}</div>
@@ -1047,8 +1066,20 @@ class HaClimatePanel extends HTMLElement {
             <label class="field ${absolute ? "" : "hidden"}" data-show="absolute"><span>Nachttemperatuur</span>
               <input name="night_temp" type="number" step="0.5" min="5" max="30" value="${c.night_temp ?? ""}" ${dis}></label>
             <label class="field ${absolute ? "hidden" : ""}" data-show="offset"><span>Verlaging (°C)</span>
-              <input name="night_offset" type="number" step="0.5" min="-10" max="0" value="${global ? sch.night_offset : c.night_offset ?? sch.night_offset}" ${global ? "disabled" : dis}></label>
+              <input name="night_offset" type="number" step="0.5" min="-10" max="0" value="${global ? sch.night_offset : c.night_offset ?? sch.night_offset}" ${global && !blocks ? "disabled" : dis}></label>
           </div>
+          <label class="field"><span>Schema</span>
+            <select name="schedule_mode" ${dis}>
+              <option value="night" ${blocks ? "" : "selected"}>Nachtverlaging (één venster per nacht)</option>
+              <option value="blocks" ${blocks ? "selected" : ""}>Comfortblokken – daarbuiten verlaagd</option>
+            </select></label>
+          <div class="${blocks ? "" : "hidden"}" data-sched="blocks">
+            <p class="muted small">Alleen binnen deze blokken staat de kamer op dagtemperatuur; daarbuiten op de nachttemperatuur of de verlaging hierboven.
+              Met optimum start begint het opwarmen vóór elk blok precies op tijd.</p>
+            <div class="periods">${periods.map((p) => this._periodRow(p, dis)).join("")}</div>
+            ${admin ? `<button class="btn text" type="button" data-period-add>+ Blok toevoegen</button>` : ""}
+          </div>
+          <div class="${blocks ? "hidden" : ""}" data-sched="night">
           <label class="check inline"><input type="checkbox" name="use_global_night" ${global ? "checked" : ""} ${dis}>
             <span>Algemene tijden en verlaging gebruiken (${esc(hhmm(s.settings.night_start))} – ${esc(hhmm(s.settings.night_end))}, ${fmt(s.settings.night_offset, 1, "°C")})</span></label>
           <div class="form-grid">
@@ -1059,8 +1090,9 @@ class HaClimatePanel extends HTMLElement {
             <label class="field"><span>Op temperatuur om</span>
               <input name="comfort_time" type="time" value="${hhmm(c.comfort_time, sch.comfort_time)}" ${dis}></label>
           </div>
+          </div>
           <label class="check inline"><input type="checkbox" name="optimum_start" ${sch.optimum_start ? "checked" : ""} ${dis}>
-            <span><b>Optimum start</b> – start de verwarming automatisch zo laat mogelijk, zodat de kamer op tijd op dagtemperatuur is</span></label>
+            <span><b>Optimum start</b> – start de verwarming automatisch zo laat mogelijk, zodat de kamer op tijd op dagtemperatuur is${blocks ? " (vóór elk blok)" : ""}</span></label>
           <div class="info">
             <div><span class="muted">Geplande start</span><b>${sch.optimum_start ? timeOf(room.preheat.next_heating_start) : "–"}</b></div>
             <div><span class="muted">Opwarmtijd</span><b>${room.preheat.lead_minutes !== null ? `${Math.floor(room.preheat.lead_minutes / 60)}u ${String(room.preheat.lead_minutes % 60).padStart(2, "0")}m` : "–"}</b></div>
@@ -1282,6 +1314,26 @@ class HaClimatePanel extends HTMLElement {
       const mode = form.querySelector('[name="night_mode"]');
       mode?.addEventListener("change", () => {
         form.querySelectorAll("[data-show]").forEach((f) => f.classList.toggle("hidden", f.dataset.show !== mode.value));
+      });
+      const sched = form.querySelector('[name="schedule_mode"]');
+      sched?.addEventListener("change", () => {
+        form.querySelectorAll("[data-sched]").forEach((f) => f.classList.toggle("hidden", f.dataset.sched !== sched.value));
+        const offset = form.querySelector('[name="night_offset"]');
+        const useGlobal = form.querySelector('[name="use_global_night"]');
+        if (offset && this._admin) offset.disabled = sched.value !== "blocks" && !!useGlobal?.checked;
+        const list = form.querySelector(".periods");
+        if (sched.value === "blocks" && list && !list.children.length) {
+          list.insertAdjacentHTML("beforeend", this._periodRow({ start: "06:30", end: "07:30" }) + this._periodRow({ start: "17:00", end: "21:00" }));
+        }
+      });
+      form.addEventListener("click", (ev) => {
+        if (ev.target.closest("[data-period-add]")) {
+          form.querySelector(".periods")?.insertAdjacentHTML("beforeend", this._periodRow());
+          this._dirty = true;
+        } else if (ev.target.closest("[data-period-remove]")) {
+          ev.target.closest(".period-row")?.remove();
+          this._dirty = true;
+        }
       });
       const global = form.querySelector('[name="use_global_night"]');
       global?.addEventListener("change", () => {
@@ -1631,7 +1683,9 @@ class HaClimatePanel extends HTMLElement {
     const f = new FormData(form);
     const get = (n) => form.querySelector(`[name="${n}"]`);
     const absolute = f.get("night_mode") === "absolute";
-    const global = get("use_global_night").checked;
+    const blocks = get("schedule_mode")?.value === "blocks";
+    // Comfort blocks use the room's own setback amount, not the general night window.
+    const global = !blocks && get("use_global_night").checked;
     const room = {
       id: form.dataset.room,
       day_temp: numOrNull(get("day_temp").value),
@@ -1642,6 +1696,20 @@ class HaClimatePanel extends HTMLElement {
     };
     if (absolute && room.night_temp === null) {
       this._toast("Vul een nachttemperatuur in", true);
+      return;
+    }
+    room.periods = blocks
+      ? [...form.querySelectorAll(".period-row")].map((r) => ({
+          start: r.querySelector('[name="period_start"]').value,
+          end: r.querySelector('[name="period_end"]').value,
+        }))
+      : [];
+    if (blocks && !room.periods.length) {
+      this._toast("Voeg minimaal één comfortblok toe", true);
+      return;
+    }
+    if (room.periods.some((p) => !p.start || !p.end || p.start === p.end)) {
+      this._toast("Elk blok heeft een begin- en eindtijd nodig die verschillen", true);
       return;
     }
     if (!global) {
@@ -2076,6 +2144,9 @@ const STYLE = `
   table { width: 100%; border-collapse: collapse; font-size: 14px; }
   th, td { text-align: left; padding: 8px; border-bottom: 1px solid var(--border); vertical-align: top; }
   th { font-weight: 500; color: var(--muted); font-size: 12px; }
+  .periods { display: flex; flex-direction: column; gap: 6px; margin: 6px 0; }
+  .period-row { display: flex; align-items: center; gap: 8px; }
+  .period-row input[type="time"] { max-width: 130px; }
   .form-grid { display: grid; gap: 12px; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); margin: 8px 0; align-items: end; }
   .field { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--muted); }
   .field.hidden { display: none; }
