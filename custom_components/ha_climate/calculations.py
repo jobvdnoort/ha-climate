@@ -7,7 +7,7 @@ tested in isolation.
 from __future__ import annotations
 
 from collections import deque
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta
 
@@ -481,3 +481,76 @@ def describe_night(
         else f"{format_number(offset if offset is not None else 0.0)} °C"
     )
     return f"{amount}, {start[:5]}–{end[:5]}"
+
+
+# ---------------------------------------------------------------------------
+# Hourly comparison: what does a setback save, and what does the reheat cost?
+# ---------------------------------------------------------------------------
+RECOVERY_HOURS = 6
+
+
+def hourly_comparison(
+    hours: list[tuple[datetime, float | None, float | None]],
+    m3_per_degree_day: float,
+    heating_limit: Callable[[date], float],
+    lowered: Callable[[datetime], float],
+    recovery_hours: int = RECOVERY_HOURS,
+) -> dict:
+    """Compare the gas per hour with the expected gas without measures.
+
+    The expected gas of an hour is ``baseline × max(0, limit − T_hour) / 24``:
+    the baseline spread over the day by the outdoor temperature. ``lowered``
+    returns the share (0–1) of the house that is lowered in an hour. Hours are
+    classified as *setback* (≥ half lowered), *recovery* (up to
+    ``recovery_hours`` after a setback) or *other*. The sum of expected − actual
+    per class shows whether lowering pays off: savings during the setback minus
+    the extra gas to warm up again.
+    """
+    rows = []
+    since_setback: int | None = None
+    totals = {
+        key: {"gas": 0.0, "expected": 0.0, "hours": 0}
+        for key in ("setback", "recovery", "other")
+    }
+    cum_gas = cum_expected = 0.0
+    for start, temperature, gas in hours:
+        expected = (
+            m3_per_degree_day * max(0.0, heating_limit(start.date()) - temperature) / 24
+            if temperature is not None
+            else None
+        )
+        share = lowered(start)
+        if share >= 0.5:
+            kind = "setback"
+            since_setback = 0
+        elif since_setback is not None and since_setback < recovery_hours:
+            kind = "recovery"
+            since_setback += 1
+        else:
+            kind = "other"
+            since_setback = None
+        if gas is not None and expected is not None:
+            cum_gas += gas
+            cum_expected += expected
+            totals[kind]["gas"] += gas
+            totals[kind]["expected"] += expected
+            totals[kind]["hours"] += 1
+        rows.append(
+            {
+                "start": start.isoformat(),
+                "temperature": temperature,
+                "gas": gas,
+                "expected": expected,
+                "saved": expected - gas if gas is not None and expected is not None else None,
+                "cumulative_saved": cum_expected - cum_gas,
+                "lowered": round(share, 2),
+                "kind": kind,
+            }
+        )
+    summary = {
+        key: {**value, "saved": value["expected"] - value["gas"]}
+        for key, value in totals.items()
+    }
+    summary["net"] = cum_expected - cum_gas
+    summary["setback_and_recovery"] = summary["setback"]["saved"] + summary["recovery"]["saved"]
+    return {"hours": rows, "summary": summary}

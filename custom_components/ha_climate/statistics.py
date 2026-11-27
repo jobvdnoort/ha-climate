@@ -148,3 +148,29 @@ async def async_daily_history(
         DayRecord(day=day, mean_temperature=temps.get(day), gas=gas.get(day))
         for day in sorted(set(temps) | set(gas))
     ]
+
+
+async def async_hourly(
+    hass: HomeAssistant,
+    temperature_id: str,
+    gas_id: str,
+    start: datetime,
+    end: datetime,
+) -> list[tuple[datetime, float | None, float | None]]:
+    """Return (hour start, mean outdoor temperature, gas used) per completed hour."""
+    stats = await get_instance(hass).async_add_executor_job(
+        statistics_during_period,
+        hass,
+        start,
+        end,
+        {temperature_id, gas_id},
+        "hour",
+        UNITS,
+        {"mean", "change"},
+    )
+    temps = {_row_start(r["start"]): r.get("mean") for r in stats.get(temperature_id, [])}
+    gas: dict[datetime, float | None] = {}
+    for row in stats.get(gas_id, []):
+        change = row.get("change")
+        gas[_row_start(row["start"])] = change if change is None or change >= 0 else None
+    return [(hour, temps.get(hour), gas.get(hour)) for hour in sorted(set(temps) | set(gas))]

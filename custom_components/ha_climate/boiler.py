@@ -172,6 +172,7 @@ def summarize_day(record: dict[str, float] | None) -> dict[str, float | int | No
             "burn_hours": None,
             "avg_run_minutes": None,
             "short_runs": None,
+            "runs": None,
             "dhw_minutes": None,
             "heat_minutes": None,
             "dhw_share": None,
@@ -183,10 +184,12 @@ def summarize_day(record: dict[str, float] | None) -> dict[str, float | int | No
     heat_s = record.get("heat_s", 0) or 0
     runs = record.get("runs", 0) or 0
     starts = int(record.get("starts", 0) or 0)
-    if runs:
-        avg_run = record.get("run_s", 0) / runs / 60
-    elif starts:
+    # Burning time per start: includes the run in progress and runs whose end was
+    # not seen, so one long run is not hidden behind a few short ones.
+    if starts:
         avg_run = flame_s / starts / 60
+    elif runs:
+        avg_run = record.get("run_s", 0) / runs / 60
     else:
         avg_run = None
     burn_hours = flame_s / 3600
@@ -205,6 +208,7 @@ def summarize_day(record: dict[str, float] | None) -> dict[str, float | int | No
         "burn_hours": burn_hours,
         "avg_run_minutes": avg_run,
         "short_runs": int(record.get("short", 0) or 0),
+        "runs": int(runs),
         "dhw_minutes": dhw_s / 60,
         "heat_minutes": heat_s / 60,
         "dhw_share": dhw_s / total if total else None,
@@ -220,6 +224,22 @@ def is_cycling(starts: float | None, avg_run_minutes: float | None) -> bool:
         and avg_run_minutes is not None
         and starts >= CYCLING_MIN_STARTS
         and avg_run_minutes < CYCLING_AVG_MINUTES
+    )
+
+
+# Many short runs while the average is fine: e.g. cycling at night with a low
+# heat demand, followed by a long run in the morning.
+SHORT_RUNS_WARN = 6
+SHORT_SHARE_WARN = 0.5
+
+
+def short_runs_warning(short_runs: int | None, runs: int | None) -> bool:
+    """Whether a large part of the completed runs was short (partial cycling)."""
+    return bool(
+        short_runs
+        and runs
+        and short_runs >= SHORT_RUNS_WARN
+        and short_runs / runs >= SHORT_SHARE_WARN
     )
 
 

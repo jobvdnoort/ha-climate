@@ -196,6 +196,7 @@ def async_register_websocket_api(hass: HomeAssistant) -> None:
         ws_fireplace_clear,
         ws_history,
         ws_boiler_trace,
+        ws_hourly,
         ws_save_room,
         ws_delete_room,
         ws_save_settings,
@@ -407,6 +408,26 @@ async def ws_history(hass, connection, msg, entry: HaClimateConfigEntry) -> None
     """Return per-day analytics."""
     rows = await entry.runtime_data.async_history(msg["days"])
     connection.send_result(msg["id"], {"days": rows})
+
+
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): "ha_climate/hourly",
+        vol.Optional("entry_id"): str,
+        vol.Optional("day"): _date,
+    }
+)
+@websocket_api.async_response
+@_with_entry
+async def ws_hourly(hass, connection, msg, entry: HaClimateConfigEntry) -> None:
+    """Gas per hour vs. expected: savings during the setback and the reheat cost."""
+    day = date.fromisoformat(msg["day"]) if msg.get("day") else dt_util.now().date()
+    try:
+        result = await entry.runtime_data.async_hourly(day)
+    except Exception:  # noqa: BLE001
+        _LOGGER.exception("Reading hourly statistics failed")
+        result = {"hours": [], "summary": None}
+    connection.send_result(msg["id"], result)
 
 
 @websocket_api.websocket_command(

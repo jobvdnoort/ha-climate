@@ -287,3 +287,10 @@ async def test_comfort_blocks(hass, ha_climate_enabled, hass_ws_client) -> None:
     )
     msg = await client.receive_json()
     assert not msg["success"]
+
+    # The hourly comparison answers, also without a baseline yet.
+    await client.send_json_auto_id({"type": "ha_climate/hourly"})
+    msg = await client.receive_json()
+    assert msg["success"], msg
+    assert "hours" in msg["result"]
+    assert coordinator.lowered_share(noon) in (0.0, 1.0)
