@@ -591,3 +591,77 @@ def night_period(now: datetime, start: time, end: time) -> tuple[datetime, datet
     if window_end <= window_start:
         window_end += timedelta(days=1)
     return window_start, window_end
+
+
+# ---------------------------------------------------------------------------
+# Comfort periods (day schedule)
+# ---------------------------------------------------------------------------
+def comfort_gaps(
+    now: datetime, periods: Iterable[tuple[time, time]]
+) -> list[tuple[datetime, datetime]]:
+    """Return the (start, end) of the setback windows around ``now``, sorted.
+
+    ``periods`` are the comfort periods of a day (e.g. 06:30–07:30 and
+    17:00–21:00). Outside them the room is lowered: a setback window starts
+    at the end of a comfort period and ends at the start of the next one.
+    Periods may cross midnight. Windows that are covered by another period
+    (overlapping periods) are dropped.
+    """
+    periods = [(s, e) for s, e in periods if s != e]
+    if not periods:
+        return []
+    gaps: list[tuple[datetime, datetime]] = []
+    for offset in (-2, -1, 0, 1):
+        base = now + timedelta(days=offset)
+        for _, end in periods:
+            gap_start = _at(base, end)
+            starts = [
+                _at(gap_start + timedelta(days=d), s)
+                for s, _ in periods
+                for d in (0, 1)
+            ]
+            gap_end = min(s for s in starts if s > gap_start)
+            gaps.append((gap_start, gap_end))
+    covered = []
+    for gap_start, gap_end in sorted(set(gaps)):
+        inside_period = False
+        for offset in (-1, 0):
+            for start, end in periods:
+                p_start = _at(gap_start + timedelta(days=offset), start)
+                p_end = _at(p_start, end)
+                if p_end <= p_start:
+                    p_end += timedelta(days=1)
+                if p_start <= gap_start < p_end:
+                    inside_period = True
+        if not inside_period:
+            covered.append((gap_start, gap_end))
+    return covered
+
+
+def comfort_gap(
+    now: datetime, periods: Iterable[tuple[time, time]]
+) -> tuple[datetime, datetime] | None:
+    """Return the most recent setback window that started ≤ now."""
+    gaps = [gap for gap in comfort_gaps(now, periods) if gap[0] <= now]
+    return gaps[-1] if gaps else None
+
+
+def next_comfort_gap_start(
+    now: datetime, periods: Iterable[tuple[time, time]]
+) -> datetime | None:
+    """Return the start of the first setback window after ``now``."""
+    starts = [gap[0] for gap in comfort_gaps(now, periods) if gap[0] > now]
+    return starts[0] if starts else None
+
+
+def setback_hours(periods: Iterable[tuple[time, time]]) -> float:
+    """Hours per day outside the comfort periods."""
+    reference = datetime(2026, 1, 15, 12, 0)
+    gaps = comfort_gaps(reference, periods)
+    day_start = reference.replace(hour=0, minute=0)
+    day_end = day_start + timedelta(days=1)
+    total = 0.0
+    for start, end in gaps:
+        overlap = min(end, day_end) - max(start, day_start)
+        total += max(0.0, overlap.total_seconds() / 3600)
+    return total

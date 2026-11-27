@@ -39,6 +39,10 @@ CONF_DAY_TEMP: Final = "day_temp"
 CONF_NIGHT_TEMP: Final = "night_temp"
 CONF_COMFORT_TIME: Final = "comfort_time"
 CONF_OPTIMUM_START: Final = "optimum_start"
+# Optional comfort periods of a day: [{"start": "06:30:00", "end": "07:30:00"}, ...].
+# Outside these periods the room is lowered (replaces the night window).
+CONF_PERIODS: Final = "periods"
+MAX_PERIODS: Final = 6
 
 CONF_FIREPLACE_CLIMATE: Final = "fireplace_climate"
 CONF_FIREPLACE_TEMP_SENSOR: Final = "fireplace_temp_sensor"
