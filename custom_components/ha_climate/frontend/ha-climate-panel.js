@@ -164,6 +164,8 @@ class HaClimatePanel extends HTMLElement {
     this._pendingAirco = {};
     this._tempTimers = {};
     this._boilerTrace = null;
+    this._hourly = null;
+    this._hourlyDay = null;
     this._advice = null;
     this._editing = false;
   }
@@ -245,12 +247,23 @@ class HaClimatePanel extends HTMLElement {
       const [result, trace] = await Promise.all([
         this._ws({ type: "ha_climate/history", days: this._days }),
         this._state?.boiler ? this._ws({ type: "ha_climate/boiler/trace" }).catch(() => ({ points: [] })) : null,
+        this._loadHourly(),
       ]);
       this._history = result.days;
       this._boilerTrace = trace ? trace.points : null;
     } catch (err) {
       this._history = [];
       this._toast(err?.message || "Kon historie niet laden", true);
+    }
+  }
+
+  async _loadHourly() {
+    try {
+      const msg = { type: "ha_climate/hourly" };
+      if (this._hourlyDay) msg.day = this._hourlyDay;
+      this._hourly = await this._ws(msg);
+    } catch (err) {
+      this._hourly = { hours: [], summary: null, baseline: null };
     }
   }
 
@@ -609,6 +622,7 @@ class HaClimatePanel extends HTMLElement {
         <button class="btn text" data-action="export">⬇ Exporteer CSV</button>
         ${this._admin ? '<button class="btn text" data-action="recalculate">Baseline herberekenen</button>' : ""}</div>
       ${this._renderMeasurement()}
+      ${this._renderHourly()}
       <div class="card">
         <h3>Graaddagen vs. gasverbruik per dag</h3>
         <div class="legend">
@@ -640,6 +654,83 @@ class HaClimatePanel extends HTMLElement {
       </div>
       ${s.boiler ? this._renderBoiler() : ""}
       ${this._renderModelSection()}`;
+  }
+
+  /* ----- Hourly: what does the setback save, what does the reheat cost? ----- */
+  _renderHourly() {
+    const today = new Date();
+    const iso = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+    const days = Array.from({ length: 7 }, (_, i) => {
+      const d = new Date(today);
+      d.setDate(d.getDate() - i);
+      return iso(d);
+    });
+    const selected = this._hourlyDay || days[0];
+    const label = (d, i) => (i === 0 ? "Vandaag" : i === 1 ? "Gisteren" : dayLabel(d));
+    const buttons = days
+      .map((d, i) => `<button class="seg ${d === selected ? "active" : ""}" data-action="hourly-day" data-day="${d}">${label(d, i)}</button>`)
+      .join("");
+    const h = this._hourly;
+    const price = this._state.energy?.gas_price ?? 0;
+    let body = '<div class="spinner"></div>';
+    if (h && (!h.hours || !h.hours.length)) {
+      body = `<p class="muted">${h.baseline === null || h.baseline === undefined ? "Nog geen baseline: het verwachte verbruik per uur is nog niet bekend." : "Geen uurstatistieken gevonden voor deze dag."}</p>`;
+    } else if (h) {
+      const sm = h.summary;
+      const val = (v) => `${v >= 0 ? "" : "−"}${fmt(Math.abs(v), 2, "m³")}`;
+      const tile = (title, part, sub) => `<div class="tile ${part.saved < -0.05 ? "warn" : ""}"><div class="muted small">${title}</div>
+        <div class="mid">${val(part.saved)}</div><div class="muted small">${euro(part.saved * price)} · ${part.hours} uur · ${fmt(part.gas, 2, "m³")} van ${fmt(part.expected, 2, "m³")} verwacht${sub ? ` · ${sub}` : ""}</div></div>`;
+      const pair = sm.setback_and_recovery;
+      let verdict;
+      if (!sm.setback.hours) verdict = "In deze periode was er (volgens het huidige schema) geen verlaging actief.";
+      else if (pair > 0.1) verdict = `<b>Verlagen loont hier:</b> de besparing tijdens de verlaging is groter dan het extra gas om weer op te warmen (netto ${val(pair)}, ${euro(pair * price)}).`;
+      else if (pair < -0.1) verdict = `<b>Het opwarmen kost meer dan de verlaging bespaart</b> (netto ${val(pair)}). Kijk een paar dagen mee; blijft dit zo, verlaag dan minder diep of korter, of gebruik optimum start. Op het tabblad Tips verschijnt dan ook advies.`;
+      else verdict = `<b>Ongeveer neutraal:</b> wat de verlaging bespaart gaat grotendeels op aan het opwarmen (netto ${val(pair)}).`;
+      body = `
+        <div class="tiles">${tile("Tijdens de verlaging", sm.setback)}${tile("Opwarmen (6 uur erna)", sm.recovery, "negatief = extra")}${tile("Verlaging + opwarmen", { ...sm.setback, saved: pair, hours: sm.setback.hours + sm.recovery.hours, gas: sm.setback.gas + sm.recovery.gas, expected: sm.setback.expected + sm.recovery.expected })}${tile("Hele periode", { saved: sm.net, hours: sm.setback.hours + sm.recovery.hours + sm.other.hours, gas: sm.setback.gas + sm.recovery.gas + sm.other.gas, expected: sm.setback.expected + sm.recovery.expected + sm.other.expected })}</div>
+        <p class="small">${verdict}</p>
+        <div class="legend">
+          <span><i style="background:${COLORS.gas}"></i>Werkelijk gas per uur (m³)</span>
+          <span><i class="line" style="background:${COLORS.expected}"></i>Verwacht zonder verlaging (m³)</span>
+          <span><i class="line" style="background:${COLORS.saved}"></i>Opgeteld bespaard (m³)</span>
+          <span><i class="shade-key"></i>Verlaagd</span>
+        </div>
+        <div class="chart" id="chart-hourly"></div>`;
+    }
+    return `
+      <div class="card">
+        <div class="card-head"><h3>Per uur: wat levert de verlaging op?</h3></div>
+        <div class="segmented small scroll day-select">${buttons}</div>
+        ${body}
+        <p class="muted small">Van 12:00 de dag ervoor tot 24:00 (afgeronde uren). Verwacht per uur = baseline × (stookgrens − buitentemperatuur van dat uur) ÷ 24:
+          wat het huis zonder verlaging zou verbruiken. Tijdens de verlaging hoort het verbruik lager te liggen; daarna stookt de ketel extra om weer op te warmen.
+          Telt dat samen positief op, dan loont verlagen. Douchen en koken tellen mee, dus een enkel uur of een enkele dag zegt weinig – kijk naar meerdere dagen.
+          Gearceerd = meer dan de helft van de lussen verlaagd volgens het huidige schema.</p>
+      </div>`;
+  }
+
+  _renderHourlyChart() {
+    const el = this.shadowRoot.getElementById("chart-hourly");
+    const h = this._hourly;
+    if (!el || !h || !h.hours || !h.hours.length) return;
+    const rows = h.hours;
+    el.innerHTML = chart({
+      width: el.clientWidth || 700,
+      labels: rows.map((r) => {
+        const t = timeOf(r.start);
+        return t === "00:00" ? `${dayLabel(r.start.slice(0, 10))}` : t;
+      }),
+      shade: rows.map((r) => r.lowered >= 0.5),
+      shadeLabel: "verlaagd",
+      labelWidth: 44,
+      series: [
+        { name: "Werkelijk", type: "bar", axis: "left", color: COLORS.gas, values: rows.map((r) => r.gas), unit: "m³", digits: 2 },
+        { name: "Verwacht", type: "line", axis: "left", color: COLORS.expected, values: rows.map((r) => r.expected), unit: "m³", digits: 2 },
+        { name: "Opgeteld bespaard", type: "line", axis: "right", color: COLORS.saved, values: rows.map((r) => r.cumulative_saved), unit: "m³", digits: 2 },
+        { name: "Buiten", type: "tooltip", axis: "left", color: "#78909c", values: rows.map((r) => r.temperature), unit: "°C" },
+        { name: "Verlaagd", type: "tooltip", axis: "left", color: "#9e9e9e", values: rows.map((r) => Math.round(r.lowered * 100)), unit: "%", digits: 0 },
+      ],
+    });
   }
 
   /* ----- Boiler & efficiency (only when configured) ----- */
@@ -685,13 +776,17 @@ class HaClimatePanel extends HTMLElement {
     const flowRows = rows.filter((r) => r.boiler.flow_avg !== null && r.boiler.flow_avg !== undefined);
     const periodFlow = flowRows.length ? flowRows.reduce((a, r) => a + r.boiler.flow_avg, 0) / flowRows.length : null;
     const cyclingPeriod = periodStarts >= 3 && periodAvgRun !== null && periodAvgRun < 10;
-    const tile = (title, value, sub, warn = false) => `<div class="tile ${warn ? "warn" : ""}"><div class="muted small">${title}</div><div class="mid">${value}</div><div class="muted small">${sub}</div></div>`;
+    const tile = (title, value, sub, warn = false) => `<div class="tile ${warn === true ? "warn" : warn || ""}"><div class="muted small">${title}</div><div class="mid">${value}</div><div class="muted small">${sub}</div></div>`;
     const kpis = [
       tile("Branderstarts vandaag", t.starts ?? "–", daysWithStarts.length ? `gem. ${fmt(periodStarts / daysWithStarts.length, 1)} per dag (${daysWithStarts.length} d)` : ""),
       tile("Branduren vandaag", t.burn_hours !== null && t.burn_hours !== undefined ? `${fmt(t.burn_hours, 1)}<small>uur</small>` : "–", rows.length ? `${fmt(periodHours, 1)} uur in ${this._days} d` : ""),
-      tile("Gem. looptijd per start", minutesText(t.avg_run_minutes),
-        b.cycling ? "⚠ pendelen: korte branderruns (&lt; 10 min)" : `${t.short_runs ? `${t.short_runs} korte runs vandaag · ` : ""}periode ${minutesText(periodAvgRun)}${cyclingPeriod ? " ⚠" : ""}`,
-        b.cycling),
+      tile("Gem. brandtijd per start", minutesText(t.avg_run_minutes),
+        b.cycling
+          ? "⚠ pendelen: gemiddeld korter dan 10 min per start"
+          : b.short_runs_warning
+            ? `⚠ ${t.short_runs} van ${t.runs} afgeronde runs korter dan 10 min (vaak bij lage warmtevraag, bijv. tijdens de verlaging) · periode ${minutesText(periodAvgRun)}`
+            : `${t.short_runs ? `${t.short_runs} korte runs vandaag · ` : ""}periode ${minutesText(periodAvgRun)}${cyclingPeriod ? " ⚠" : ""}`,
+        b.cycling ? "warn" : b.short_runs_warning ? "note" : false),
       tile("Gem. aanvoertemperatuur", t.flow_avg !== null && t.flow_avg !== undefined ? `${fmt(t.flow_avg, 1)}<small>°C</small>` : "–",
         `tijdens branden${periodFlow !== null ? ` · periode ${fmt(periodFlow, 1, "°C")}` : ""}${t.modulation_avg !== null && t.modulation_avg !== undefined ? ` · modulatie ${fmt(t.modulation_avg, 0, "%")}` : ""}`),
     ].join("");
@@ -715,7 +810,7 @@ class HaClimatePanel extends HTMLElement {
     return `
       <div class="card boiler">
         <div class="card-head"><h3>Ketel &amp; efficiëntie</h3>
-          ${b.cycling ? '<span class="chip" style="--chip:#e53935">Pendelen</span>' : ""}</div>
+          ${b.cycling ? '<span class="chip" style="--chip:#e53935">Pendelen</span>' : b.short_runs_warning ? '<span class="chip" style="--chip:#fb8c00">Veel korte runs</span>' : ""}</div>
         ${status.length ? `<div class="bstatus">${status.join("")}</div>` : ""}
         <div class="tiles">${kpis}</div>
         <p class="muted small">${b.tracking_flame ? "Starts en branduren worden geteld vanuit de vlamstatus" : "Geen vlamstatus ingesteld: starts en branduren alleen uit de ketelsensoren"}${ent.boiler_starts_today || ent.boiler_hours_today || ent.boiler_avg_runtime ? "; de tellers van de ketel zelf gaan voor" : ""}.
@@ -904,6 +999,7 @@ class HaClimatePanel extends HTMLElement {
       });
     }
     this._renderBoilerCharts();
+    this._renderHourlyChart();
     const roomsEl = root.getElementById("chart-rooms");
     if (roomsEl) roomsEl.innerHTML = roomChart(this._state.rooms, roomsEl.clientWidth || 700);
     this._bindCharts();
@@ -1029,6 +1125,29 @@ class HaClimatePanel extends HTMLElement {
   }
 
   /* ----- Schedules ----- */
+  /** Show, hide and grey out the schedule fields for the chosen schedule type. */
+  _syncScheduleForm(form) {
+    const get = (n) => form.querySelector(`[name="${n}"]`);
+    const blocks = get("schedule_mode")?.value === "blocks";
+    const mode = get("night_mode")?.value;
+    form.querySelectorAll("[data-show]").forEach((f) => f.classList.toggle("hidden", f.dataset.show !== mode));
+    form.querySelector('[data-sched="blocks"]')?.classList.toggle("hidden", !blocks);
+    const night = form.querySelector('[data-sched="night"]');
+    if (night) {
+      night.classList.toggle("dimmed", blocks);
+      if (this._admin) night.disabled = blocks;
+    }
+    form.querySelector("[data-night-note]")?.toggleAttribute("hidden", !blocks);
+    const label = form.querySelector("[data-lowered-label]");
+    if (label) label.textContent = blocks ? "Buiten de blokken" : "Nacht";
+    if (this._admin) {
+      const global = !blocks && get("use_global_night")?.checked;
+      ["night_start", "night_end"].forEach((n) => get(n) && (get(n).disabled = !!global));
+      // The general setback amount belongs to the general night window only.
+      if (get("night_offset")) get("night_offset").disabled = !!global;
+    }
+  }
+
   _periodRow(p = { start: "17:00", end: "21:00" }, dis = "") {
     return `<div class="period-row">
       <input name="period_start" type="time" value="${esc(hhmm(p.start))}" ${dis} aria-label="Begin blok">
@@ -1055,42 +1174,43 @@ class HaClimatePanel extends HTMLElement {
         <form class="card schedule" data-room="${room.id}">
           <div class="room-head"><div class="room-name">${esc(room.name)}</div>
             <span class="muted small">nu ${fmt(room.current_temperature, 1, "°C")}</span></div>
-          <div class="form-grid">
-            <label class="field"><span>Dagtemperatuur</span>
-              <input name="day_temp" type="number" step="0.5" min="5" max="30" value="${c.day_temp ?? ""}" placeholder="huidige stand" ${dis}></label>
-            <label class="field"><span>Nacht</span>
-              <select name="night_mode" ${dis}>
-                <option value="offset" ${absolute ? "" : "selected"}>Verlaging (relatief)</option>
-                <option value="absolute" ${absolute ? "selected" : ""}>Vaste nachttemperatuur</option>
-              </select></label>
-            <label class="field ${absolute ? "" : "hidden"}" data-show="absolute"><span>Nachttemperatuur</span>
-              <input name="night_temp" type="number" step="0.5" min="5" max="30" value="${c.night_temp ?? ""}" ${dis}></label>
-            <label class="field ${absolute ? "hidden" : ""}" data-show="offset"><span>Verlaging (°C)</span>
-              <input name="night_offset" type="number" step="0.5" min="-10" max="0" value="${global ? sch.night_offset : c.night_offset ?? sch.night_offset}" ${global && !blocks ? "disabled" : dis}></label>
-          </div>
           <label class="field"><span>Schema</span>
             <select name="schedule_mode" ${dis}>
               <option value="night" ${blocks ? "" : "selected"}>Nachtverlaging (één venster per nacht)</option>
               <option value="blocks" ${blocks ? "selected" : ""}>Comfortblokken – daarbuiten verlaagd</option>
             </select></label>
-          <div class="${blocks ? "" : "hidden"}" data-sched="blocks">
-            <p class="muted small">Alleen binnen deze blokken staat de kamer op dagtemperatuur; daarbuiten op de nachttemperatuur of de verlaging hierboven.
+          <div class="form-grid">
+            <label class="field"><span>Dagtemperatuur</span>
+              <input name="day_temp" type="number" step="0.5" min="5" max="30" value="${c.day_temp ?? ""}" placeholder="huidige stand" ${dis}></label>
+            <label class="field"><span data-lowered-label>${blocks ? "Buiten de blokken" : "Nacht"}</span>
+              <select name="night_mode" ${dis}>
+                <option value="offset" ${absolute ? "" : "selected"}>Verlaging (relatief)</option>
+                <option value="absolute" ${absolute ? "selected" : ""}>Vaste temperatuur</option>
+              </select></label>
+            <label class="field ${absolute ? "" : "hidden"}" data-show="absolute"><span>Verlaagde temperatuur</span>
+              <input name="night_temp" type="number" step="0.5" min="5" max="30" value="${c.night_temp ?? ""}" ${dis}></label>
+            <label class="field ${absolute ? "hidden" : ""}" data-show="offset"><span>Verlaging (°C)</span>
+              <input name="night_offset" type="number" step="0.5" min="-10" max="0" value="${global ? sch.night_offset : c.night_offset ?? sch.night_offset}" ${dis}></label>
+          </div>
+          <div class="sched-section ${blocks ? "" : "hidden"}" data-sched="blocks">
+            <p class="muted small">Alleen binnen deze blokken staat de kamer op dagtemperatuur; daarbuiten verlaagd zoals hierboven.
               Met optimum start begint het opwarmen vóór elk blok precies op tijd.</p>
             <div class="periods">${periods.map((p) => this._periodRow(p, dis)).join("")}</div>
             ${admin ? `<button class="btn text" type="button" data-period-add>+ Blok toevoegen</button>` : ""}
           </div>
-          <div class="${blocks ? "hidden" : ""}" data-sched="night">
-          <label class="check inline"><input type="checkbox" name="use_global_night" ${global ? "checked" : ""} ${dis}>
+          <fieldset class="sched-section" data-sched="night" ${dis}>
+          <label class="check inline"><input type="checkbox" name="use_global_night" ${global ? "checked" : ""}>
             <span>Algemene tijden en verlaging gebruiken (${esc(hhmm(s.settings.night_start))} – ${esc(hhmm(s.settings.night_end))}, ${fmt(s.settings.night_offset, 1, "°C")})</span></label>
           <div class="form-grid">
             <label class="field"><span>Start nachtverlaging</span>
-              <input name="night_start" type="time" value="${hhmm(global ? sch.night_start : c.night_start, sch.night_start)}" ${global ? "disabled" : dis}></label>
+              <input name="night_start" type="time" value="${hhmm(global ? sch.night_start : c.night_start, sch.night_start)}"></label>
             <label class="field"><span>Herstel zonder optimum start</span>
-              <input name="night_end" type="time" value="${hhmm(global ? sch.night_end : c.night_end, sch.night_end)}" ${global ? "disabled" : dis}></label>
+              <input name="night_end" type="time" value="${hhmm(global ? sch.night_end : c.night_end, sch.night_end)}"></label>
             <label class="field"><span>Op temperatuur om</span>
-              <input name="comfort_time" type="time" value="${hhmm(c.comfort_time, sch.comfort_time)}" ${dis}></label>
+              <input name="comfort_time" type="time" value="${hhmm(c.comfort_time, sch.comfort_time)}"></label>
           </div>
-          </div>
+          <p class="muted small" data-night-note ${blocks ? "" : "hidden"}>Niet van toepassing: deze kamer volgt de comfortblokken.</p>
+          </fieldset>
           <label class="check inline"><input type="checkbox" name="optimum_start" ${sch.optimum_start ? "checked" : ""} ${dis}>
             <span><b>Optimum start</b> – start de verwarming automatisch zo laat mogelijk, zodat de kamer op tijd op dagtemperatuur is${blocks ? " (vóór elk blok)" : ""}</span></label>
           <div class="info">
@@ -1311,20 +1431,16 @@ class HaClimatePanel extends HTMLElement {
         if (form.id === "settings-form") this._saveSettings(form);
         else this._saveSchedule(form);
       });
-      const mode = form.querySelector('[name="night_mode"]');
-      mode?.addEventListener("change", () => {
-        form.querySelectorAll("[data-show]").forEach((f) => f.classList.toggle("hidden", f.dataset.show !== mode.value));
-      });
+      const sync = () => this._syncScheduleForm(form);
+      form.querySelector('[name="night_mode"]')?.addEventListener("change", sync);
+      form.querySelector('[name="use_global_night"]')?.addEventListener("change", sync);
       const sched = form.querySelector('[name="schedule_mode"]');
       sched?.addEventListener("change", () => {
-        form.querySelectorAll("[data-sched]").forEach((f) => f.classList.toggle("hidden", f.dataset.sched !== sched.value));
-        const offset = form.querySelector('[name="night_offset"]');
-        const useGlobal = form.querySelector('[name="use_global_night"]');
-        if (offset && this._admin) offset.disabled = sched.value !== "blocks" && !!useGlobal?.checked;
         const list = form.querySelector(".periods");
         if (sched.value === "blocks" && list && !list.children.length) {
           list.insertAdjacentHTML("beforeend", this._periodRow({ start: "06:30", end: "07:30" }) + this._periodRow({ start: "17:00", end: "21:00" }));
         }
+        sync();
       });
       form.addEventListener("click", (ev) => {
         if (ev.target.closest("[data-period-add]")) {
@@ -1335,13 +1451,7 @@ class HaClimatePanel extends HTMLElement {
           this._dirty = true;
         }
       });
-      const global = form.querySelector('[name="use_global_night"]');
-      global?.addEventListener("change", () => {
-        ["night_start", "night_end", "night_offset"].forEach((n) => {
-          const input = form.querySelector(`[name="${n}"]`);
-          if (input) input.disabled = global.checked;
-        });
-      });
+      if (sched) sync();
     });
     const filter = root.getElementById("climate-filter");
     filter?.addEventListener("input", () => {
@@ -1408,6 +1518,13 @@ class HaClimatePanel extends HTMLElement {
         }
         break;
       }
+      case "hourly-day":
+        this._hourlyDay = el.dataset.day;
+        this._hourly = null;
+        this._render();
+        await this._loadHourly();
+        this._render();
+        break;
       case "days":
         this._days = Number(el.dataset.days);
         this._history = null;
@@ -2042,6 +2159,8 @@ const STYLE = `
   .conf { display: inline-flex; align-items: center; gap: 6px; }
   .conf-bar { display: inline-block; width: 70px; height: 6px; background: var(--border); border-radius: 3px; overflow: hidden; }
   .conf-bar span { display: block; height: 100%; }
+  .segmented.day-select { max-width: 100%; overflow-x: auto; margin-bottom: 10px; }
+  .segmented.day-select .seg { white-space: nowrap; }
   .segmented { display: inline-flex; border: 1px solid var(--border); border-radius: 18px; overflow: hidden; }
   .seg { background: none; border: 0; padding: 6px 12px; cursor: pointer; color: var(--primary-text-color); font-family: inherit; font-size: 13px; }
   .seg.active { background: var(--accent); color: var(--text-primary-color, #fff); }
@@ -2144,6 +2263,9 @@ const STYLE = `
   table { width: 100%; border-collapse: collapse; font-size: 14px; }
   th, td { text-align: left; padding: 8px; border-bottom: 1px solid var(--border); vertical-align: top; }
   th { font-weight: 500; color: var(--muted); font-size: 12px; }
+  .sched-section { border: 0; padding: 0; margin: 4px 0; min-width: 0; }
+  .sched-section.hidden { display: none; }
+  .sched-section.dimmed { opacity: 0.4; }
   .periods { display: flex; flex-direction: column; gap: 6px; margin: 6px 0; }
   .period-row { display: flex; align-items: center; gap: 8px; }
   .period-row input[type="time"] { max-width: 130px; }
@@ -2187,6 +2309,7 @@ const STYLE = `
     background: var(--secondary-background-color, rgba(0,0,0,.04)); }
   .bstat { display: flex; flex-direction: column; gap: 4px; align-items: flex-start; min-width: 110px; }
   .tile.warn { box-shadow: inset 3px 0 0 #e53935; }
+  .tile.note { box-shadow: inset 3px 0 0 #fb8c00; }
   .split { display: flex; height: 10px; border-radius: 5px; overflow: hidden; background: var(--border); margin: 6px 0 2px; }
   .split span { display: block; height: 100%; }
   .legend .shade-key { width: 12px; height: 10px; background: #5c6bc0; opacity: .25; border-radius: 2px; }

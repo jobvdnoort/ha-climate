@@ -52,6 +52,7 @@ from .boiler import (
     BoilerTracker,
     hours_from,
     is_cycling,
+    short_runs_warning,
     minutes_from,
     pressure_status,
     summarize_day,
@@ -67,6 +68,7 @@ from .calculations import (
     daily_fixed_costs,
     describe_night,
     describe_periods,
+    hourly_comparison,
     rank_rooms,
     day_fraction,
     degree_days,
@@ -164,7 +166,12 @@ from .recorder_history import (
     async_boiler_trace,
     async_climate_samples,
 )
-from .statistics import async_daily_history, async_first_overlap, async_period_value
+from .statistics import (
+    async_daily_history,
+    async_first_overlap,
+    async_hourly,
+    async_period_value,
+)
 from .thermal import (
     PreheatPlan,
     RoomThermalModel,
@@ -863,6 +870,7 @@ class HaClimateCoordinator(DataUpdateCoordinator[EnergyData]):
             "max_valve": max(valves) if valves else None,
             "today": today,
             "cycling": is_cycling(today["starts"], today["avg_run_minutes"]),
+            "short_runs_warning": short_runs_warning(today["short_runs"], today["runs"]),
             "tracking_flame": bool(cfg.get(CONF_BOILER_FLAME)),
         }
 
@@ -1774,6 +1782,54 @@ class HaClimateCoordinator(DataUpdateCoordinator[EnergyData]):
         return self._day_rows(
             self._stored_records(today - timedelta(days=days), today), include_today=True
         )
+
+    def lowered_share(self, moment: datetime) -> float:
+        """Share of the loops lowered at ``moment`` according to the current schedules.
+
+        Only days on which the setback was actually active count.
+        """
+        moment = dt_util.as_local(moment)
+        if moment.date().isoformat() not in self._stored["setback_dates"]:
+            return 0.0
+        total = lowered = 0
+        for room in self.rooms:
+            weight = max(1, len(room.get(CONF_ROOM_CLIMATES, [])))
+            total += weight
+            if not self.room_enabled(room[CONF_ROOM_ID]):
+                continue
+            schedule = self.schedule(room)
+            if schedule.periods:
+                gap = comfort_gap(moment, schedule.periods)
+                active = gap is not None and gap[0] <= moment < gap[1]
+            else:
+                start, end = night_period(moment, schedule.start, schedule.end)
+                active = start <= moment < end
+            if active:
+                lowered += weight
+        return lowered / total if total else 0.0
+
+    async def async_hourly(self, day: date) -> dict[str, Any]:
+        """Gas per hour vs. expected, from the previous noon until the end of ``day``.
+
+        Shows what a setback saves during the night and what the reheat costs.
+        """
+        baseline = self.effective_baseline
+        start = dt_util.start_of_local_day(day) - timedelta(hours=12)
+        end = min(dt_util.start_of_local_day(day + timedelta(days=1)), dt_util.now())
+        if baseline is None or end <= start:
+            return {"hours": [], "summary": None, "baseline": baseline}
+        cfg = self.config
+        hours = await async_hourly(
+            self.hass, cfg[CONF_OUTDOOR_SENSOR], cfg[CONF_GAS_SENSOR], start, end
+        )
+        # Half past the hour: whether the hour was (mostly) lowered.
+        result = hourly_comparison(
+            hours,
+            baseline,
+            self.heating_limit_for,
+            lambda hour: self.lowered_share(hour + timedelta(minutes=30)),
+        )
+        return {**result, "baseline": baseline, "day": day.isoformat()}
 
     def export_rows(self) -> list[dict[str, Any]]:
         """All permanently stored days (for the CSV export)."""
