@@ -489,17 +489,67 @@ def describe_night(
 RECOVERY_HOURS = 6
 
 
+PROFILE_MIN_DAYS = 7
+PROFILE_MIN_DEGREE_DAYS = 5.0
+
+
+def hourly_profile(
+    hours: list[tuple[datetime, float | None, float | None]],
+    heating_limit: Callable[[date], float],
+    exclude: set[date] | frozenset[date] = frozenset(),
+    min_degree_days: float = PROFILE_MIN_DEGREE_DAYS,
+    min_days: int = PROFILE_MIN_DAYS,
+) -> tuple[list[float], int] | None:
+    """Share of the daily gas per hour of the day (24 values summing to 1).
+
+    Learned from cold enough, complete days (24 hours with gas and
+    temperature) that are not in ``exclude``. A house does not use its gas
+    evenly over the day: the morning warm-up, showers and cooking all fall in
+    fixed hours. Comparing an hour with this profile instead of with a flat
+    1/24 share keeps those habits from looking like reheat cost.
+    Returns ``(profile, days used)`` or ``None`` with too few days.
+    """
+    by_day: dict[date, list[tuple[int, float, float]]] = {}
+    for start, temperature, gas in hours:
+        if temperature is None or gas is None:
+            continue
+        by_day.setdefault(start.date(), []).append((start.hour, temperature, gas))
+    sums = [0.0] * 24
+    total = 0.0
+    used = 0
+    for day, rows in by_day.items():
+        if day in exclude or len(rows) != 24 or len({h for h, _, _ in rows}) != 24:
+            continue
+        mean = sum(t for _, t, _ in rows) / 24
+        day_gas = sum(g for _, _, g in rows)
+        if heating_limit(day) - mean < min_degree_days or day_gas <= 0:
+            continue
+        for hour, _, gas in rows:
+            sums[hour] += gas
+        total += day_gas
+        used += 1
+    if used < min_days or total <= 0:
+        return None
+    return [value / total for value in sums], used
+
+
 def hourly_comparison(
     hours: list[tuple[datetime, float | None, float | None]],
     m3_per_degree_day: float,
     heating_limit: Callable[[date], float],
     lowered: Callable[[datetime], float],
     recovery_hours: int = RECOVERY_HOURS,
+    profile: list[float] | None = None,
+    day_temperature: Callable[[date], float | None] | None = None,
 ) -> dict:
     """Compare the gas per hour with the expected gas without measures.
 
-    The expected gas of an hour is ``baseline × max(0, limit − T_hour) / 24``:
-    the baseline spread over the day by the outdoor temperature. ``lowered``
+    Without a ``profile`` the expected gas of an hour is
+    ``baseline × max(0, limit − T_hour) / 24``: the baseline spread evenly over
+    the day. With a ``profile`` (see :func:`hourly_profile`) it is the expected
+    gas of the whole day, ``baseline × max(0, limit − T_day)``, times the share
+    of that hour in the days before the measurement; ``T_day`` comes from
+    ``day_temperature`` or else the mean of the given hours of that day. ``lowered``
     returns the share (0–1) of the house that is lowered in an hour. Hours are
     classified as *setback* (≥ half lowered), *recovery* (up to
     ``recovery_hours`` after a setback) or *other*. The sum of expected − actual
@@ -513,12 +563,33 @@ def hourly_comparison(
         for key in ("setback", "recovery", "other")
     }
     cum_gas = cum_expected = 0.0
+    day_means: dict[date, float | None] = {}
+    if profile is not None:
+        temps: dict[date, list[float]] = {}
+        for start, temperature, _ in hours:
+            if temperature is not None:
+                temps.setdefault(start.date(), []).append(temperature)
+        for day in {start.date() for start, _, _ in hours}:
+            value = day_temperature(day) if day_temperature else None
+            if value is None and temps.get(day):
+                value = sum(temps[day]) / len(temps[day])
+            day_means[day] = value
     for start, temperature, gas in hours:
-        expected = (
-            m3_per_degree_day * max(0.0, heating_limit(start.date()) - temperature) / 24
-            if temperature is not None
-            else None
-        )
+        if profile is not None:
+            mean = day_means.get(start.date())
+            expected = (
+                m3_per_degree_day
+                * max(0.0, heating_limit(start.date()) - mean)
+                * profile[start.hour]
+                if mean is not None
+                else None
+            )
+        else:
+            expected = (
+                m3_per_degree_day * max(0.0, heating_limit(start.date()) - temperature) / 24
+                if temperature is not None
+                else None
+            )
         share = lowered(start)
         if share >= 0.5:
             kind = "setback"

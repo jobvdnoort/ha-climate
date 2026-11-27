@@ -70,6 +70,12 @@ const fmt = (value, digits = 1, unit = "") => {
   return unit ? `${text} ${unit}` : text;
 };
 
+// Saved gas (expected − actual): positive = saved (green), negative = used more than expected (red).
+const savedClass = (value, deadband = 0) =>
+  value === null || value === undefined || Number.isNaN(value) ? "" : value > deadband ? "good" : value < -deadband ? "bad" : "";
+const savedNote = (value) =>
+  value === null || value === undefined || Number.isNaN(value) ? "" : value > 0 ? "bespaard" : value < 0 ? "meer verbruikt dan verwacht" : "";
+
 const euro = (value) =>
   value === null || value === undefined ? "–" : new Intl.NumberFormat("nl-NL", { style: "currency", currency: "EUR" }).format(value);
 
@@ -702,8 +708,12 @@ class HaClimatePanel extends HTMLElement {
         <div class="card-head"><h3>Per uur: wat levert de verlaging op?</h3></div>
         <div class="segmented small scroll day-select">${buttons}</div>
         ${body}
-        <p class="muted small">Van 12:00 de dag ervoor tot 24:00 (afgeronde uren). Verwacht per uur = baseline × (stookgrens − buitentemperatuur van dat uur) ÷ 24:
-          wat het huis zonder verlaging zou verbruiken. Tijdens de verlaging hoort het verbruik lager te liggen; daarna stookt de ketel extra om weer op te warmen.
+        <p class="muted small">Van 12:00 de dag ervoor tot 24:00 (afgeronde uren). ${h && h.profile_days
+          ? `Verwacht per uur = het verwachte dagverbruik, verdeeld over de uren zoals het huis vóór de start stookte (geleerd uit ${h.profile_days} koude dagen zonder verlaging).
+             Vaste gewoontes zoals douchen en de ochtendpiek zitten daar al in, en tellen dus niet als opwarmkosten.`
+          : `Verwacht per uur = baseline × (stookgrens − buitentemperatuur van dat uur) ÷ 24 (gelijk over de dag verdeeld; er zijn nog te weinig koude dagen zonder verlaging om het dagpatroon van het huis te leren).
+             Let op: de ochtend lijkt daardoor duurder dan hij is, want douchen en de ochtendpiek vallen op vaste uren.`}
+          Dit is wat het huis zonder verlaging zou verbruiken. Tijdens de verlaging hoort het verbruik lager te liggen; daarna stookt de ketel extra om weer op te warmen.
           Telt dat samen positief op, dan loont verlagen. Douchen en koken tellen mee, dus een enkel uur of een enkele dag zegt weinig – kijk naar meerdere dagen.
           Gearceerd = meer dan de helft van de lussen verlaagd volgens het huidige schema.</p>
       </div>`;
@@ -1253,11 +1263,11 @@ class HaClimatePanel extends HTMLElement {
           <button class="btn text" data-action="savings-start">Wijzigen</button></div>` : ""}
       </div>
       <div class="tiles">
-        <div class="tile"><div class="muted small">Totaal bespaard (${e.saved_total_days ?? 0} d)</div><div class="mid">${fmt(e.saved_total, 2)}<small>m³</small></div>
-          <div class="muted small">${e.saved_total === null || e.saved_total === undefined ? "nog geen volledige dag" : euro(e.saved_total * price)}</div></div>
-        <div class="tile"><div class="muted small">Gisteren</div><div class="mid">${days >= 1 ? fmt(e.saved_yesterday, 2) : "–"}<small>m³</small></div>
+        <div class="tile"><div class="muted small">Totaal bespaard (${e.saved_total_days ?? 0} d)</div><div class="mid ${savedClass(e.saved_total)}">${fmt(e.saved_total, 2)}<small>m³</small></div>
+          <div class="muted small">${e.saved_total === null || e.saved_total === undefined ? "nog geen volledige dag" : `${euro(e.saved_total * price)} · ${savedNote(e.saved_total)}`}</div></div>
+        <div class="tile"><div class="muted small">Gisteren</div><div class="mid ${days >= 1 ? savedClass(e.saved_yesterday) : ""}">${days >= 1 ? fmt(e.saved_yesterday, 2) : "–"}<small>m³</small></div>
           <div class="muted small">${days >= 1 ? `${fmt(e.gas_yesterday, 2)} van ${fmt(e.expected_yesterday, 2)} m³ verwacht` : "vóór de start"}</div></div>
-        <div class="tile"><div class="muted small">Vandaag tot nu (voorlopig)</div><div class="mid">${fmt(e.saved_today, 2)}<small>m³</small></div>
+        <div class="tile"><div class="muted small">Vandaag tot nu (voorlopig)</div><div class="mid ${savedClass(e.saved_today)}">${fmt(e.saved_today, 2)}<small>m³</small></div>
           <div class="muted small">${fmt(e.gas_today, 2)} van ${fmt(e.expected_today, 2)} m³ verwacht</div></div>
       </div>
       ${this._renderFireplaceDays()}
@@ -1276,22 +1286,26 @@ class HaClimatePanel extends HTMLElement {
       .map((p) => {
         const until = p.current ? "nu" : dateLabel(p.end);
         const pct = p.fraction === null || p.fraction === undefined ? null : p.fraction * 100;
-        const color = pct === null ? "" : pct >= 2 ? "good" : pct <= -2 ? "bad" : "";
+        const early = p.days > 0 && p.days < 3;
+        const color = pct === null || early ? "" : savedClass(pct, 0.5);
+        const perMonth = p.per_day !== null && p.per_day !== undefined ? p.per_day * 30 * price : null;
         return `<tr class="${p.current ? "current" : ""}">
           <td>${dateLabel(p.start)} – ${until}</td>
           <td>${esc(p.text)}${p.current ? ' <span class="chip" style="--chip:var(--accent)">nu</span>' : ""}</td>
-          <td>${p.days}${p.fireplace_days ? `<br><small class="muted">+${p.fireplace_days} openhaard</small>` : ""}</td>
-          <td>${p.days ? `${fmt(p.actual, 1)} / ${fmt(p.expected, 1)} m³` : "–"}</td>
-          <td class="${color}"><b>${pct === null ? "–" : `${pct > 0 ? "−" : "+"}${fmt(Math.abs(pct), 0)} %`}</b></td>
-          <td>${p.per_day !== null && p.per_day !== undefined ? `${euro(p.per_day * 30 * price)}` : "–"}</td>
+          <td class="num">${p.days}${p.fireplace_days ? `<br><small class="muted">+${p.fireplace_days} openhaard</small>` : ""}</td>
+          <td class="num">${p.days ? `${fmt(p.actual, 1)} / ${fmt(p.expected, 1)} m³` : "–"}</td>
+          <td class="num ${color}"><b>${pct === null ? "–" : `${pct > 0 ? "−" : "+"}${fmt(Math.abs(pct), 0)} %`}</b>${early ? '<br><small class="muted">voorlopig</small>' : ""}</td>
+          <td class="num ${color}"><b>${perMonth === null ? "–" : euro(perMonth)}</b></td>
         </tr>`;
       })
       .join("");
     return `<div class="table-wrap"><table class="ranking periods">
-      <thead><tr><th>Periode</th><th>Instelling</th><th>Dagen</th><th>Verbruikt / verwacht</th><th>Verschil</th><th>€ per maand</th></tr></thead>
+      <thead><tr><th>Periode</th><th>Instelling</th><th class="num">Dagen</th><th class="num">Verbruikt / verwacht</th><th class="num">Verschil gas</th><th class="num">Bespaard per maand</th></tr></thead>
       <tbody>${rows}</tbody></table></div>
       <p class="muted small">Elke wijziging van de nachtverlaging (tijden, verlaging, aan/uit, per kamer) start een nieuwe periode; een wijziging na 12:00 telt vanaf de
-        volgende dag. Alleen volledige dagen tellen, dagen met de openhaard niet. − = minder gas dan verwacht (bespaard).</p>`;
+        volgende dag. Alleen volledige dagen tellen, dagen met de openhaard niet.
+        <span class="good">Groen</span> = minder gas dan verwacht (bespaard), <span class="bad">rood</span> = meer gas dan verwacht; pas vanaf 3 dagen gekleurd.
+        Of het opwarmen in de ochtend de nachtbesparing opeet, zie je per dag bij <i>Analyses → Per uur</i>.</p>`;
   }
 
   _renderFireplaceDays() {
@@ -2228,8 +2242,9 @@ const STYLE = `
   details.card.optional { margin-top: 0; padding-top: 4px; }
   .save-bar { position: sticky; bottom: 0; display: flex; justify-content: flex-end; padding: 12px 0;
     background: linear-gradient(transparent, var(--primary-background-color, #fafafa) 40%); }
-  table.periods td.good b { color: #43a047; }
-  table.periods td.bad b { color: #e53935; }
+  .good, table.periods td.good b { color: #43a047; }
+  .bad, table.periods td.bad b { color: #e53935; }
+  table.periods th.num, table.periods td.num { text-align: right; white-space: nowrap; }
   table.periods tr.current td { background: color-mix(in srgb, var(--accent) 7%, transparent); }
   .fp-days { margin: 8px 0; line-height: 1.8; }
   .fp-day { margin-right: 12px; white-space: nowrap; }
@@ -2266,7 +2281,7 @@ const STYLE = `
   .sched-section { border: 0; padding: 0; margin: 4px 0; min-width: 0; }
   .sched-section.hidden { display: none; }
   .sched-section.dimmed { opacity: 0.4; }
-  .periods { display: flex; flex-direction: column; gap: 6px; margin: 6px 0; }
+  div.periods { display: flex; flex-direction: column; gap: 6px; margin: 6px 0; }
   .period-row { display: flex; align-items: center; gap: 8px; }
   .period-row input[type="time"] { max-width: 130px; }
   .form-grid { display: grid; gap: 12px; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); margin: 8px 0; align-items: end; }

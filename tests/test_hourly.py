@@ -60,3 +60,42 @@ def test_long_run_counts_in_average_run_time() -> None:
     assert not boiler.is_cycling(day["starts"], day["avg_run_minutes"])
     assert boiler.short_runs_warning(day["short_runs"], day["runs"])
     assert not boiler.short_runs_warning(2, 3)
+
+
+def _profile_days(n_days, gas_by_hour, temperature=0.0):
+    start = datetime(2026, 1, 1)
+    return [
+        (start + timedelta(days=d, hours=h), temperature, gas_by_hour[h])
+        for d in range(n_days)
+        for h in range(24)
+    ]
+
+
+def test_profile_from_cold_complete_days() -> None:
+    # Morning peak: 07:00–09:00 use three times as much.
+    day = [0.3 if h in (7, 8) else 0.1 for h in range(24)]
+    learned = calc.hourly_profile(_profile_days(8, day), lambda _d: 18.0)
+    assert learned is not None
+    profile, used = learned
+    assert used == 8
+    assert sum(profile) == pytest.approx(1.0)
+    assert profile[7] == pytest.approx(0.3 / 2.8)
+    # Too few days, warm days and excluded days do not count.
+    assert calc.hourly_profile(_profile_days(6, day), lambda _d: 18.0) is None
+    assert calc.hourly_profile(_profile_days(8, day, temperature=15.0), lambda _d: 18.0) is None
+    excluded = {datetime(2026, 1, 1).date()}
+    assert calc.hourly_profile(_profile_days(7, day), lambda _d: 18.0, excluded) is None
+
+
+def test_profile_makes_morning_habits_neutral() -> None:
+    # Same day pattern as before the measurement: no saving, no reheat cost.
+    day = [0.3 if h in (7, 8) else 0.1 for h in range(24)]
+    profile, _ = calc.hourly_profile(_profile_days(8, day), lambda _d: 18.0)
+    hours = [(datetime(2026, 11, 27) + timedelta(hours=h), 0.0, day[h]) for h in range(24)]
+    baseline = 2.8 / 18  # m³ per degree day that gives exactly 2.8 m³ at 0 °C
+    lowered = lambda h: 1.0 if h.hour < 6 else 0.0  # noqa: E731
+    flat = calc.hourly_comparison(hours, baseline, lambda _d: 18.0, lowered)
+    shaped = calc.hourly_comparison(hours, baseline, lambda _d: 18.0, lowered, profile=profile)
+    assert flat["summary"]["recovery"]["saved"] < -0.1  # flat spread blames the morning
+    assert shaped["summary"]["recovery"]["saved"] == pytest.approx(0)
+    assert shaped["summary"]["net"] == pytest.approx(0)
