@@ -516,8 +516,13 @@ class HaClimatePanel extends HTMLElement {
       (s) =>
         s.entity_id.startsWith("sensor.") &&
         (roomValves.includes(s.entity_id) ||
-          (s.attributes.unit_of_measurement === "%" && !["battery", "humidity", "moisture"].includes(s.attributes.device_class)))
+          (s.attributes.unit_of_measurement === "%" && !["battery", "humidity", "moisture"].includes(s.attributes.device_class)) ||
+          /stelgro|stelwaarde|klep|valve|command.?value/i.test(`${s.entity_id} ${s.attributes.friendly_name || ""}`))
     );
+    // Valve sensors that match the room name first, so the right ones are easy to find.
+    const roomWords = (room.name || "").toLowerCase().split(/[^a-z0-9]+/).filter((w) => w.length > 2 && !["en", "kamer"].includes(w));
+    const matches = (c) => roomWords.some((w) => c.name.toLowerCase().includes(w) || c.id.includes(w));
+    valveSensors.sort((a, b) => Number(matches(b)) - Number(matches(a)) || a.name.localeCompare(b.name));
     const climates = this._entities((s) => s.entity_id.startsWith("climate."));
     const list = climates
       .map((c) => {
@@ -553,9 +558,9 @@ class HaClimatePanel extends HTMLElement {
               const state = this._hass.states[c.id];
               return `<label class="check ${used ? "disabled" : ""}" data-name="${esc(c.name.toLowerCase())} ${esc(c.id)}">
                 <input type="checkbox" name="valve" value="${esc(c.id)}" ${roomValves.includes(c.id) ? "checked" : ""} ${used ? "disabled" : ""}>
-                <span>${esc(c.name)}<br><small class="muted">${esc(c.id)} · ${esc(state?.state ?? "–")} %${used ? " · in andere kamer" : ""}</small></span></label>`;
+                <span>${esc(c.name)}<br><small class="muted">${esc(c.id)} · ${esc(state?.state ?? "–")} ${esc(state?.attributes.unit_of_measurement ?? "")}${used ? " · in andere kamer" : ""}</small></span></label>`;
             })
-            .join("") : '<p class="muted small">Geen sensoren met eenheid % gevonden.</p>'}</div>
+            .join("") : '<p class="muted small">Geen klepstand-sensoren gevonden (sensor met eenheid % of met stelgrootte/klep in de naam).</p>'}</div>
           <p class="muted small">Bijv. KNX- of vloerverwarmingsactoren (0–100 %). Indien gekoppeld gebruikt HA Climate de gemiddelde klepopening voor het stookpercentage en het thermische model (opwarmsnelheid).</p>
           <p class="muted small">De schema's (dag-/nachttemperatuur, tijden, optimum start) stel je in op het tabblad Schema's.</p>
           <div class="actions">
